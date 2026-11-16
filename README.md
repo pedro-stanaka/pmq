@@ -24,6 +24,29 @@ curl -H 'Host: hello-world.apps.localhost' http://127.0.0.1:8080/
 
 Visit `http://hello-world.apps.localhost:8080` if your resolver maps localhost subdomains to loopback. `--dev` is disabled by default, permits a fixed development identity, and requires a literal loopback listen address. The deploy token is still required. Prefer the environment variable to `--token`, which can appear in process listings. A CLI deployment URL uses the server URL's scheme and port; if administrative ingress differs from application ingress, use your actual public app URL instead.
 
+## Local HTTPS with pmq.dev
+
+With [mkcert](https://github.com/FiloSottile/mkcert) installed, run:
+
+```sh
+./scripts/setup-local.sh                  # adds pmq.dev and hello-world.pmq.dev
+# For additional apps: ./scripts/setup-local.sh hello-world writing-buddy
+export PMQ_DEPLOY_TOKEN="$(openssl rand -hex 32)"
+make build
+./bin/pmq serve --dev --listen 127.0.0.1:8443 --domain pmq.dev \
+  --tls-cert .local/certs/pmq.dev.pem --tls-key .local/certs/pmq.dev-key.pem
+```
+
+In another terminal with the same token:
+
+```sh
+./bin/pmq deploy ./examples/hello-world --name hello-world --server https://pmq.dev:8443
+```
+
+Open `https://hello-world.pmq.dev:8443`. The script installs mkcert's local CA into the trust store and may request a password, generates a certificate for `pmq.dev`, `*.pmq.dev`, `localhost`, and `127.0.0.1`, and appends loopback entries to `/etc/hosts` (using sudo when needed). It refuses conflicting entries and can be rerun. `/etc/hosts` does not support wildcard names: rerun the script with each additional application name. The private key and certificate are stored in ignored `.local/certs/`; do not share the key or mkcert's CA key. To undo setup, remove the lines marked `# PMQ local development` from `/etc/hosts`, delete `.local/certs/`, and run `mkcert -uninstall` if you no longer need its local CA for anything else. A browser may need a restart to pick up trust changes.
+
+Built-in TLS is available only with `--dev` on a literal loopback address; it does not authenticate users and is not a production TLS option. The deployment token is still required. `.dev` uses HTTPS-only browser policies, so use the HTTPS URL above.
+
 Create and list documents using the app origin. Browser writes automatically send an Origin; curl must supply one:
 
 ```sh

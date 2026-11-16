@@ -8,7 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/pmq-dev/pmq/internal/pmq"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +19,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/pmq-dev/pmq/internal/pmq"
 )
 
 var version = "dev"
@@ -60,11 +61,19 @@ func serve(args []string) error {
 	data := f.String("data-dir", env("PMQ_DATA_DIR", "./data"), "data directory")
 	domain := f.String("domain", env("PMQ_DOMAIN", "apps.localhost"), "application domain")
 	dev := f.Bool("dev", env("PMQ_DEV", "") == "true", "explicit loopback-only development mode")
+	cert := f.String("tls-cert", "", "development TLS certificate file")
+	key := f.String("tls-key", "", "development TLS private key file")
 	token := f.String("token", env("PMQ_DEPLOY_TOKEN", ""), "deployment token (prefer environment)")
 	header := f.String("identity-header", env("PMQ_IDENTITY_HEADER", "X-PMQ-User"), "proxy identity header")
 	proxies := f.String("trusted-proxies", env("PMQ_TRUSTED_PROXIES", ""), "comma-separated IPs or CIDRs")
 	if err := f.Parse(args); err != nil {
 		return err
+	}
+	if (*cert == "") != (*key == "") {
+		return errors.New("tls-cert and tls-key must be provided together")
+	}
+	if *cert != "" && !*dev {
+		return errors.New("built-in TLS is available only in loopback development mode")
 	}
 	var ps []netip.Prefix
 	for _, v := range strings.Split(*proxies, ",") {
@@ -101,7 +110,11 @@ func serve(args []string) error {
 		defer cancel()
 		_ = srv.Shutdown(c)
 	}()
-	err = srv.Serve(ln)
+	if *cert != "" {
+		err = srv.ServeTLS(ln, *cert, *key)
+	} else {
+		err = srv.Serve(ln)
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
