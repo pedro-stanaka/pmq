@@ -1,0 +1,16 @@
+services:
+  pmq:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PMQ_DOMAIN: ${PMQ_DOMAIN:?Set PMQ_DOMAIN}
+      PMQ_DEPLOY_TOKEN: ${PMQ_DEPLOY_TOKEN:?Set PMQ_DEPLOY_TOKEN}
+      PMQ_TRUSTED_PROXIES: ${PMQ_TRUSTED_PROXIES:?Set PMQ_TRUSTED_PROXIES to the proxy's observed address}
+      PMQ_IDENTITY_HEADER: ${PMQ_IDENTITY_HEADER:-X-PMQ-User}
+    volumes:
+      - pmq-data:/data
+    stop_grace_period: 15s
+volumes:
+  pmq-data:

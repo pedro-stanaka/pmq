@@ -19,7 +19,7 @@ It provides:
 
 Some capabilities may not yet be implemented. Consult the README and actual code to determine what currently exists.
 
-The project is inspired by Shopify Quick, but is independently designed for small, trusted environments.
+The project is inspired by Shopify Quick, but is independently designed for small, fully trusted environments. Every person who can access PMQ or its applications must be trusted. Do not deploy PMQ in an environment where users are mutually untrusted.
 
 ## Core philosophy
 
@@ -45,7 +45,7 @@ PMQ is intentionally not a general-purpose PaaS.
 1. **Simplicity over flexibility.** Prefer a small explicit implementation over a highly configurable framework.
 2. **One binary where practical.** Avoid introducing long-running services without a compelling reason.
 3. **Local-first.** SQLite and the filesystem are preferred over external infrastructure.
-4. **Trusted environment, not trusted input.** Users may be trusted; HTTP requests, uploaded files, and generated JavaScript are not.
+4. **Full-trust users, validated input.** Trust all users with access to PMQ, but validate HTTP requests, uploaded files, and generated JavaScript; trust does not prevent mistakes or malicious external traffic.
 5. **Soft app isolation.** Separate data by application, but do not build a hardened multi-tenant platform.
 6. **Agent-friendly by design.** APIs, commands, and errors should be predictable and easily understood by coding agents.
 7. **Boring technology wins.** Prefer standard protocols and maintained libraries.
@@ -181,7 +181,7 @@ Frontend redeployments must never delete persistent app data.
 
 ## Authentication and trust boundaries
 
-PMQ is designed for private trusted environments.
+PMQ is a full-trust system for private environments. All users who access PMQ or its applications must be trusted. It is not intended for mutually untrusted users or hostile multi-tenancy. Authentication controls access to the trusted group; it does not provide per-user data isolation.
 
 This does not mean authentication can be bypassed by default.
 
@@ -240,6 +240,8 @@ Deployments must be:
 Never expose partially uploaded releases.
 
 Use versioned releases.
+
+Deploying an application name that already exists replaces its entire active set of static files with the newly uploaded directory; do not merge the two deployments or require a separate overwrite confirmation. Files omitted from the new upload are no longer part of the active app. Activate the replacement atomically, retain previous releases according to the existing retention policy, and preserve the application’s separate persistent data.
 
 The eventual CLI should support deploy, list, status, rollback, and delete operations.
 
