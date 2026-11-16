@@ -1,0 +1,1 @@
+body{font:16px system-ui,sans-serif;background:#f4f5f8;color:#202436;margin:0}main{max-width:38rem;margin:4rem auto;padding:2rem;background:white;border-radius:1rem}form{display:flex;flex-wrap:wrap;gap:.7rem;align-items:center}input{flex:1;min-width:12rem;padding:.6rem}button{padding:.6rem 1rem;cursor:pointer}#error{color:#a21a2a}

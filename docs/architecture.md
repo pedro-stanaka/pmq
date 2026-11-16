@@ -1,0 +1,7 @@
+# Architecture
+
+The reverse proxy terminates HTTPS and authenticates users, strips incoming identity headers, and sets the configured identity header. PMQ checks the TCP peer against explicit CIDRs, validates the application hostname, checks the current release, authenticates, and routes internal APIs before static files. Admin endpoints use a separate bearer token. Local development is explicit and loopback-only.
+
+Layout version `data/VERSION` is `1`. `apps/<name>/releases/<random-id>/` holds validated assets; `apps/<name>/current` is an atomically replaced release identifier. `state/<name>/data.sqlite` holds the application's documents in WAL mode. A failed or interrupted upload cannot expose a staging directory. Successful releases are retained, including orphan releases left by interruption. Persistent state is never part of the release. Only one PMQ process should operate on a data directory; no distributed locking is implemented. Local filesystem access to the data directory must be restricted to the PMQ operator. SQLite connections are serialized per application and use a busy timeout. Future APIs can use the same validated app and authentication boundary.
+
+Static fallback serves `index.html` for unknown paths. Immutable releases are expected to be modified only by PMQ. PMQ does not protect against a hostile local user who can alter its data directory. See the README for backups and proxy assumptions.
