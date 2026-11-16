@@ -4,6 +4,8 @@
 
 PMQ hosts static applications and per-app JSON documents in one Go process. Deploy a built directory over HTTP and reach it at its own hostname. SQLite and release files live on local disk. PMQ does not run application backend code or provide user accounts, hard tenant isolation, object storage, or AI access.
 
+**PMQ is a full-trust system. Deploy it only when you trust every user who can access PMQ and its applications.** It is designed for a trusted group, not mutually untrusted users. Authentication restricts access to that group; it does not provide per-user data isolation.
+
 ## Quick start
 
 Requires Go 1.27 or later. Build and run on loopback with an explicit development identity:
@@ -21,6 +23,8 @@ In another terminal (use the same token):
 ./bin/pmq list --server http://127.0.0.1:8080
 curl -H 'Host: hello-world.apps.localhost' http://127.0.0.1:8080/
 ```
+
+Deploying again with the same `--name` replaces the app’s complete active set of files with the new directory: files omitted from the new deployment are no longer part of the active app. This happens without an overwrite prompt. Its persistent documents are preserved; previous releases remain on disk.
 
 Visit `http://hello-world.apps.localhost:8080` if your resolver maps localhost subdomains to loopback. `--dev` is disabled by default, permits a fixed development identity, and requires a literal loopback listen address. The deploy token is still required. Prefer the environment variable to `--token`, which can appear in process listings. A CLI deployment URL uses the server URL's scheme and port; if administrative ingress differs from application ingress, use your actual public app URL instead.
 
@@ -70,4 +74,4 @@ For Docker, copy `.env.example` to `.env`, replace all values, especially the tr
 
 A validated hostname selects an app; its active immutable release serves files, while a separate SQLite database stores documents. Deployments stage and validate archives then atomically replace a release pointer. See [architecture](docs/architecture.md). Data layout version 1 stores releases under `data/apps/` and databases under `data/state/`. Back up the **entire data directory**, including SQLite WAL files. Stop PMQ for a consistent filesystem backup, or use a SQLite-aware online backup plus a coordinated release snapshot. Test restores. Releases are retained indefinitely; there is no rollback, deletion, or garbage collection command yet.
 
-This is a single-node system for a trusted environment, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. Reserved storage and AI routes currently return 404. Future milestones may add object storage, an AI gateway, rollback, and deployment management; OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
+This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. Reserved storage and AI routes currently return 404. Future milestones may add object storage, an AI gateway, rollback, and deployment management; OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
