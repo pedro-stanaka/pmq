@@ -1,0 +1,114 @@
+package storage_test
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pmq-dev/pmq/internal/pmq"
+	"github.com/pmq-dev/pmq/internal/storage"
+)
+
+func TestStorageContract(t *testing.T) {
+	configs := map[string]storage.Config{"filesystem": {DataDir: t.TempDir()}}
+	if endpoint := os.Getenv("PMQ_TEST_S3_ENDPOINT"); endpoint != "" {
+		configs["s3"] = storage.Config{Provider: "s3", Endpoint: endpoint, Region: os.Getenv("PMQ_TEST_S3_REGION"), Bucket: os.Getenv("PMQ_TEST_S3_BUCKET"), AccessKey: os.Getenv("PMQ_TEST_S3_ACCESS_KEY"), SecretKey: os.Getenv("PMQ_TEST_S3_SECRET_KEY"), Insecure: true, PathStyle: true}
+	}
+	for name, cfg := range configs {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			s, err := storage.New(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			app1, err := pmq.HostApp("first.apps.example.com", "apps.example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			app2, err := pmq.HostApp("second.apps.example.com", "apps.example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, _ := s.ForApp(app1)
+			b, _ := s.ForApp(app2)
+			key := "test/" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+			defer a.Delete(context.Background(), key)
+			defer b.Delete(context.Background(), key)
+			if err := a.Upload(ctx, key, strings.NewReader("one")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.Get(ctx, key); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("cross-app read: %v", err)
+			}
+			if err := b.Upload(ctx, key, strings.NewReader("two")); err != nil {
+				t.Fatal(err)
+			}
+			r, err := a.Get(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(r)
+			r.Close()
+			if err != nil || string(data) != "one" {
+				t.Fatalf("get: %q %v", data, err)
+			}
+			if err := b.Delete(ctx, key); err != nil {
+				t.Fatal(err)
+			}
+			r, err = a.Get(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Close()
+			for _, bad := range []string{"", "../second/key", "/x", "x/../y", "x//y", "x/./y", `x\y`, "x\x00y", strings.Repeat("a", 161)} {
+				if err := a.Upload(ctx, bad, strings.NewReader("x")); !errors.Is(err, storage.ErrInvalidKey) {
+					t.Errorf("upload %q: %v", bad, err)
+				}
+				if err := a.Delete(ctx, bad); !errors.Is(err, storage.ErrInvalidKey) {
+					t.Errorf("delete %q: %v", bad, err)
+				}
+			}
+			for _, bad := range []string{"../second", "first/../../second", "admin", ""} {
+				if _, err := s.ForApp(bad); err == nil {
+					t.Errorf("accepted app %q", bad)
+				}
+			}
+			canceled, stop := context.WithCancel(ctx)
+			stop()
+			if err := a.Upload(canceled, key, strings.NewReader("x")); !errors.Is(err, context.Canceled) {
+				t.Errorf("canceled upload: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfiguration(t *testing.T) {
+	for _, cfg := range []storage.Config{{Provider: "bad"}, {Provider: "s3"}, {Provider: "filesystem"}} {
+		if _, err := storage.New(context.Background(), cfg); err == nil {
+			t.Errorf("accepted invalid config %+v", cfg)
+		}
+	}
+}
+
+func TestS3RejectsBadCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `<Error><Code>AccessDenied</Code><Message>Access denied</Message></Error>`)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := storage.New(ctx, storage.Config{Provider: "s3", Endpoint: strings.TrimPrefix(server.URL, "http://"), Region: "us-east-1", Bucket: "test-bucket", AccessKey: "bad", SecretKey: "bad", Insecure: true, PathStyle: true})
+	if err == nil || !strings.Contains(err.Error(), "S3 bucket access check failed") {
+		t.Fatalf("expected access failure, got %v", err)
+	}
+}

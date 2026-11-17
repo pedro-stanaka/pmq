@@ -3,6 +3,7 @@ package pmq
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
@@ -26,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pmq-dev/pmq/internal/storage"
 	_ "modernc.org/sqlite"
 )
 
@@ -34,10 +36,9 @@ const MaxJSON = 1 << 20
 
 var nameRE = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var idRE = regexp.MustCompile(`^[a-f0-9]{32}$`)
-var reserved = map[string]bool{"www": true, "api": true, "admin": true, "_pmq": true, "pmq": true}
 
 func ValidName(s string) bool {
-	return len(s) > 0 && len(s) <= 63 && nameRE.MatchString(s) && !reserved[s]
+	return storage.ValidApp(s)
 }
 func HostApp(host, domain string) (string, error) {
 	if strings.Contains(host, ":") {
@@ -88,11 +89,13 @@ type Config struct {
 	Listen, DataDir, Domain, Token, IdentityHeader string
 	Dev                                            bool
 	TrustedProxies                                 []netip.Prefix
+	Storage                                        storage.Config
 }
 type Server struct {
-	cfg Config
-	mu  sync.Mutex
-	dbs map[string]*sql.DB
+	cfg     Config
+	mu      sync.Mutex
+	dbs     map[string]*sql.DB
+	storage *storage.Store
 }
 
 func New(c Config) (*Server, error) {
@@ -131,11 +134,21 @@ func New(c Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: c, dbs: make(map[string]*sql.DB)}, nil
+	c.Storage.DataDir = c.DataDir
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	store, err := storage.New(ctx, c.Storage)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store}, nil
 }
 func (s *Server) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.storage.Close(); err != nil {
+		log.Printf("close storage: %v", err)
+	}
 	for _, db := range s.dbs {
 		_ = db.Close()
 	}
