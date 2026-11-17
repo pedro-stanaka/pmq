@@ -149,7 +149,7 @@ func serve(args []string) error {
 		return err
 	}
 	aiConfig := pmq.AIConfig{Models: aiModels, DefaultModel: os.Getenv("PMQ_AI_DEFAULT_MODEL"), OpenAIKey: os.Getenv("OPENAI_API_KEY"), OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"), AWSRegion: env("AWS_REGION", os.Getenv("AWS_DEFAULT_REGION")), OpenAIBaseURL: os.Getenv("PMQ_OPENAI_BASE_URL"), OpenRouterBaseURL: os.Getenv("PMQ_OPENROUTER_BASE_URL"), BedrockBaseURL: os.Getenv("PMQ_BEDROCK_BASE_URL"), Limits: aiLimits}
-	s, err := pmq.New(pmq.Config{Storage: storageConfig, AI: aiConfig, Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
+	s, err := pmq.New(pmq.Config{Storage: storageConfig, AI: aiConfig, AITraceEndpoint: os.Getenv("PMQ_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"), Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
 	if err != nil {
 		return err
 	}

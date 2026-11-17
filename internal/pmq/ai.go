@@ -13,10 +13,14 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/bedrock"
 	"github.com/openai/openai-go/v3/option"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const maxAIRequest = 1 << 20
@@ -157,7 +161,7 @@ func boundedAIHTTPClient(c *http.Client, maxResponseBytes int64) *http.Client {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	client.Transport = responseLimitTransport{base: base, maximum: maxResponseBytes}
+	client.Transport = responseLimitTransport{base: aiTraceRoundTripper{base: base}, maximum: maxResponseBytes}
 	return client
 }
 
@@ -189,6 +193,9 @@ func newAIProvider(c AIConfig) (ChatProvider, error) {
 	for alias, binding := range c.Models {
 		if strings.TrimSpace(alias) == "" || strings.TrimSpace(binding.ModelID) == "" {
 			return nil, fmt.Errorf("AI model alias %q has an empty alias or upstream model ID", alias)
+		}
+		if !validAIModelAlias(alias) {
+			return nil, fmt.Errorf("AI model alias %q must be at most 64 ASCII letters, digits, dots, underscores, or hyphens", alias)
 		}
 		provider := strings.ToLower(strings.TrimSpace(binding.Provider))
 		if provider != "openai" && provider != "openrouter" && provider != "bedrock" {
@@ -361,6 +368,19 @@ type chatStreamChunk struct {
 	Usage   *ChatUsage         `json:"usage,omitempty"`
 }
 
+func aiChunkHasContent(raw json.RawMessage) bool {
+	var chunk chatStreamChunk
+	if json.Unmarshal(raw, &chunk) != nil {
+		return false
+	}
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Content != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func readChatSSE(ctx context.Context, upstream io.Reader, alias string, emit func(json.RawMessage) error) (*ChatUsage, error) {
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 4096), maxAIStreamLine)
@@ -521,9 +541,23 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.aiTimeout)
 	defer cancel()
+	if s.aiTracerProvider != nil {
+		ctx = safeAITraceParent(ctx, r.Header.Get("traceparent"))
+	}
+	provider, metricAlias := configuredAIIdentity(s.cfg.AI, b)
+	ctx, span := s.aiTracer.Start(ctx, "pmq.ai.request", trace.WithAttributes(attribute.String("pmq.ai.provider", provider), attribute.String("pmq.ai.model_alias", metricAlias), attribute.Bool("pmq.ai.stream", req.Stream)))
+	defer span.End()
 	reservation, reason, retryAfter := s.aiAdmission.admit(app, alias, req)
 	if reason != "" {
 		s.aiAdmission.reject(reason)
+		boundedReason := reason
+		switch reason {
+		case "rate_limit", "concurrency_limit", "budget_limit":
+		default:
+			boundedReason = "other"
+		}
+		s.aiMetrics.limitRejected.WithLabelValues(boundedReason).Inc()
+		span.SetStatus(codes.Error, "limit")
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		code, message := "ai_rate_limited", "AI request rate limit exceeded"
 		if reason == "concurrency_limit" {
@@ -535,12 +569,17 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 		fail(w, 429, code, message)
 		return
 	}
+	startedAt := time.Now()
+	s.aiMetrics.active.WithLabelValues(provider, metricAlias).Inc()
+	defer s.aiMetrics.active.WithLabelValues(provider, metricAlias).Dec()
 	if req.Stream {
-		s.aiStream(w, ctx, json.RawMessage(b), reservation, alias)
+		s.aiStream(w, ctx, json.RawMessage(b), reservation, alias, provider, metricAlias, startedAt, span)
 		return
 	}
 	response, err := s.aiProvider.Complete(ctx, json.RawMessage(b))
 	if err != nil {
+		s.recordAIResult(provider, metricAlias, startedAt, err, ctx)
+		span.SetStatus(codes.Error, boundedAIError(err, ctx))
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 		s.logAIAccounting(alias, nil, usageStatus, reservation, cost)
@@ -549,6 +588,8 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 	}
 	var completion ChatResponse
 	if err := json.Unmarshal(response, &completion); err != nil {
+		s.recordAIResult(provider, metricAlias, startedAt, err, ctx)
+		span.SetStatus(codes.Error, "provider")
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 		s.logAIAccounting(alias, nil, usageStatus, reservation, cost)
@@ -561,6 +602,12 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 		completion.Usage = nil
 		response, _ = json.Marshal(completion)
 	}
+	s.recordAIResult(provider, metricAlias, startedAt, nil, ctx)
+	if validChatUsage(usage) {
+		s.recordAIUsage(provider, metricAlias, usage)
+	} else if err == nil {
+		s.aiMetrics.usageMissing.WithLabelValues(provider, metricAlias).Inc()
+	}
 	cost, usageStatus := s.aiAdmission.finish(reservation, usage)
 	s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 	s.logAIAccounting(alias, usage, usageStatus, reservation, cost)
@@ -569,15 +616,17 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 	_, _ = w.Write(response)
 }
 
-func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.RawMessage, reservation *aiReservation, alias string) {
+func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.RawMessage, reservation *aiReservation, alias, provider, metricAlias string, startedAt time.Time, span trace.Span) {
 	streamer, ok := s.aiProvider.(StreamingChatProvider)
 	if !ok {
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
+		s.recordAIResult(provider, metricAlias, startedAt, errors.New("streaming unsupported"), ctx)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 		fail(w, 501, "streaming_unsupported", "Configured provider does not support streaming")
 		return
 	}
 	started := false
+	firstToken := true
 	emit := func(chunk json.RawMessage) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -591,6 +640,10 @@ func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.
 			w.WriteHeader(http.StatusOK)
 			started = true
 		}
+		if firstToken && aiChunkHasContent(chunk) {
+			s.aiMetrics.ttft.WithLabelValues(provider, metricAlias).Observe(time.Since(startedAt).Seconds())
+			firstToken = false
+		}
 		if _, err := w.Write(append(append([]byte("data: "), chunk...), '\n', '\n')); err != nil {
 			return err
 		}
@@ -602,6 +655,15 @@ func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.
 	usage, err := streamer.Stream(ctx, body, emit)
 	if usage != nil && !validChatUsage(usage) {
 		usage = nil
+	}
+	s.recordAIResult(provider, metricAlias, startedAt, err, ctx)
+	if err != nil {
+		span.SetStatus(codes.Error, boundedAIError(err, ctx))
+	}
+	if validChatUsage(usage) {
+		s.recordAIUsage(provider, metricAlias, usage)
+	} else if err == nil {
+		s.aiMetrics.usageMissing.WithLabelValues(provider, metricAlias).Inc()
 	}
 	cost, usageStatus := s.aiAdmission.finish(reservation, usage)
 	s.logAIAccounting(alias, usage, usageStatus, reservation, cost)

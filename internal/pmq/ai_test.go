@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -77,6 +78,275 @@ func TestAIHTTPStreamingFrames(t *testing.T) {
 		t.Fatalf("unexpected SSE response: status=%d headers=%v body=%q", w.Code, w.Header(), w.Body.String())
 	}
 }
+
+func TestAIMetricsUseOnlyConfiguredBoundedLabels(t *testing.T) {
+	provider := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`), nil
+	})
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AIProvider: provider, AI: AIConfig{DefaultModel: "safe-alias", Models: map[string]ModelBinding{"safe-alias": {Provider: "openai", ModelID: "private-model-id"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	upload(t, s, "sensitive-app", "sensitive-app")
+	req(s, http.MethodPost, "sensitive-app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"safe-alias","messages":[{"role":"user","content":"private prompt text"}]}`), true)
+	metrics := scrapeMetrics(t, s)
+	for _, want := range []string{`pmq_ai_requests_total{error="none",model_alias="safe-alias",outcome="success",provider="openai"} 1`, `pmq_ai_tokens_total{direction="input",model_alias="safe-alias",provider="openai"} 4`, `pmq_ai_tokens_total{direction="output",model_alias="safe-alias",provider="openai"} 2`} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("missing metric %q", want)
+		}
+	}
+	for _, secret := range []string{"private-model-id", "private prompt text", "sensitive-app"} {
+		if strings.Contains(metrics, secret) {
+			t.Errorf("AI metrics leaked %q", secret)
+		}
+	}
+}
+
+func TestAIProviderFailureMetricAndNoPromptSpanAttributes(t *testing.T) {
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AIProvider: chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return nil, errors.New("secret prompt and API key")
+	}), AI: AIConfig{DefaultModel: "bounded", Models: map[string]ModelBinding{"bounded": {Provider: "openrouter", ModelID: "private/model"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	upload(t, s, "app", "app")
+	req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"bounded","messages":[{"role":"user","content":"secret prompt"}]}`), true)
+	metrics := scrapeMetrics(t, s)
+	if !strings.Contains(metrics, `pmq_ai_requests_total{error="provider",model_alias="bounded",outcome="failure",provider="openrouter"} 1`) {
+		t.Fatal("provider failure not measured")
+	}
+	for _, secret := range []string{"secret prompt", "private/model", "API key"} {
+		if strings.Contains(metrics, secret) {
+			t.Errorf("metric leaked %q", secret)
+		}
+	}
+}
+
+func TestAITracePropagationDropsBaggageAndTracestate(t *testing.T) {
+	var got http.Header
+	transport := aiTraceRoundTripper{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		got = r.Header.Clone()
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}, nil
+	})}
+	ctx := safeAITraceParent(context.Background(), "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://provider.example", nil)
+	req.Header.Set("baggage", "user=private")
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("traceparent") == "" {
+		t.Fatal("trace context was not propagated")
+	}
+	if got.Get("tracestate") != "" || got.Get("baggage") != "" {
+		t.Fatalf("unsafe trace baggage propagated: %v", got)
+	}
+}
+
+func TestAIMetricsSuccessForEveryProvider(t *testing.T) {
+	for _, provider := range []string{"openai", "openrouter", "bedrock"} {
+		t.Run(provider, func(t *testing.T) {
+			if provider == "bedrock" {
+				t.Setenv("AWS_ACCESS_KEY_ID", "test")
+				t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"x","object":"chat.completion","created":1,"model":"upstream-id","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
+			}))
+			defer upstream.Close()
+			cfg := AIConfig{DefaultModel: "friendly", Models: map[string]ModelBinding{"friendly": {Provider: provider, ModelID: "private/upstream"}}, OpenAIKey: "test", OpenRouterKey: "test", AWSRegion: "us-east-1", OpenAIBaseURL: upstream.URL + "/v1", OpenRouterBaseURL: upstream.URL + "/v1", BedrockBaseURL: upstream.URL + "/openai/v1"}
+			p, err := newAIProvider(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			upload(t, s, "sample", "sample")
+			w := req(s, http.MethodPost, "sample.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"prompt hidden"}]}`), true)
+			if w.Code != 200 {
+				t.Fatalf("response: %d %s", w.Code, w.Body)
+			}
+			metrics := scrapeMetrics(t, s)
+			if !strings.Contains(metrics, `provider="`+provider+`"`) || !strings.Contains(metrics, `model_alias="friendly"`) || !strings.Contains(metrics, `direction="input"`) {
+				t.Fatalf("usage metrics missing: %s", metrics)
+			}
+			for _, secret := range []string{"private/upstream", "upstream-id", "prompt hidden"} {
+				if strings.Contains(metrics, secret) {
+					t.Errorf("sensitive value leaked: %q", secret)
+				}
+			}
+		})
+	}
+}
+
+func TestAIProviderFailureMetricsForEveryProvider(t *testing.T) {
+	for _, provider := range []string{"openai", "openrouter", "bedrock"} {
+		t.Run(provider, func(t *testing.T) {
+			if provider == "bedrock" {
+				t.Setenv("AWS_ACCESS_KEY_ID", "test")
+				t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "secret upstream error", http.StatusServiceUnavailable)
+			}))
+			defer upstream.Close()
+			cfg := AIConfig{DefaultModel: "friendly", Models: map[string]ModelBinding{"friendly": {Provider: provider, ModelID: "private/model"}}, OpenAIKey: "test", OpenRouterKey: "test", AWSRegion: "us-east-1", OpenAIBaseURL: upstream.URL + "/v1", OpenRouterBaseURL: upstream.URL + "/v1", BedrockBaseURL: upstream.URL + "/openai/v1"}
+			p, err := newAIProvider(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			upload(t, s, "app", "app")
+			w := req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"private prompt"}]}`), true)
+			if w.Code != 502 {
+				t.Fatalf("status %d: %s", w.Code, w.Body)
+			}
+			metrics := scrapeMetrics(t, s)
+			if !strings.Contains(metrics, `error="provider"`) || !strings.Contains(metrics, `outcome="failure"`) || !strings.Contains(metrics, `provider="`+provider+`"`) {
+				t.Fatalf("failure metric missing: %s", metrics)
+			}
+			for _, secret := range []string{"private/model", "private prompt", "secret upstream error"} {
+				if strings.Contains(metrics, secret) {
+					t.Errorf("metrics leaked %q", secret)
+				}
+			}
+		})
+	}
+}
+
+type usageStreamProvider struct{ chatProviderFunc }
+
+func (p usageStreamProvider) Stream(_ context.Context, _ json.RawMessage, emit func(json.RawMessage) error) (*ChatUsage, error) {
+	if err := emit(json.RawMessage(`{"object":"chat.completion.chunk","choices":[{"delta":{"content":""}}]}`)); err != nil {
+		return nil, err
+	}
+	if err := emit(json.RawMessage(`{"object":"chat.completion.chunk","choices":[{"delta":{"content":"token"}}]}`)); err != nil {
+		return nil, err
+	}
+	return &ChatUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7, complete: true}, nil
+}
+
+func TestAIStreamMetricsUseFinalUsageAndFirstContent(t *testing.T) {
+	cfg := AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: "openai", ModelID: "private-model"}}}
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: usageStreamProvider{chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(chatResponse), nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	upload(t, s, "app", "app")
+	w := req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"stream":true,"messages":[{"role":"user","content":"hidden"}]}`), true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	metrics := scrapeMetrics(t, s)
+	for _, want := range []string{`pmq_ai_tokens_total{direction="input",model_alias="alias",provider="openai"} 5`, `pmq_ai_tokens_total{direction="output",model_alias="alias",provider="openai"} 2`, `pmq_ai_time_to_first_token_seconds_count{model_alias="alias",provider="openai"} 1`} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("missing stream metric %q from:\n%s", want, metrics)
+		}
+	}
+	if strings.Contains(metrics, `pmq_ai_usage_missing_total{provider="openai",model_alias="alias"} 1`) {
+		t.Fatal("complete stream usage was marked missing")
+	}
+}
+
+func TestAILimitRejectionMetricUsesBoundedReason(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	provider := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		close(entered)
+		<-release
+		return json.RawMessage(chatResponse), nil
+	})
+	cfg := AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: "openai", ModelID: "private-model"}}, Limits: AILimits{GlobalConcurrency: 1, PerAppConcurrency: 1}}
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	upload(t, s, "app", "app")
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"a"}]}`), true)
+	}()
+	<-entered
+	second := req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"b"}]}`), true)
+	if second.Code != 429 {
+		t.Fatalf("second request: %d %s", second.Code, second.Body)
+	}
+	close(release)
+	<-firstDone
+	metrics := scrapeMetrics(t, s)
+	if !strings.Contains(metrics, `pmq_ai_limit_rejections_total{reason="concurrency_limit"} 1`) {
+		t.Fatalf("limit metric missing: %s", metrics)
+	}
+	if strings.Contains(metrics, "private-model") || strings.Contains(metrics, "app.apps.localhost") {
+		t.Fatal("private values leaked in metric labels")
+	}
+}
+
+type capturedSpans struct{ spans []sdktrace.ReadOnlySpan }
+
+func (c *capturedSpans) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	c.spans = append(c.spans, spans...)
+	return nil
+}
+func (c *capturedSpans) Shutdown(context.Context) error { return nil }
+
+func TestAITraceSpanContainsOnlySafeAttributes(t *testing.T) {
+	provider := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(chatResponse), nil
+	})
+	cfg := AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: "openai", ModelID: "private-model"}}}
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	upload(t, s, "private-app", "app")
+	captured := &capturedSpans{}
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(captured))
+	defer tp.Shutdown(context.Background())
+	s.aiTracer = tp.Tracer("test")
+	req(s, http.MethodPost, "private-app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"alias","messages":[{"role":"user","content":"prompt-secret"}]}`), true)
+	if err := tp.ForceFlush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured.spans) != 1 {
+		t.Fatalf("captured %d spans", len(captured.spans))
+	}
+	span := captured.spans[0]
+	if span.Name() != "pmq.ai.request" {
+		t.Fatalf("span name %q", span.Name())
+	}
+	attrs := span.Attributes()
+	joined := span.Name()
+	for _, a := range attrs {
+		joined += string(a.Key) + a.Value.Emit()
+	}
+	for _, secret := range []string{"prompt-secret", "private-app", "private-model", "alice", "secret"} {
+		if strings.Contains(joined, secret) {
+			t.Errorf("span leaked %q: %s", secret, joined)
+		}
+	}
+	if !strings.Contains(joined, "openai") || !strings.Contains(joined, "alias") {
+		t.Fatalf("safe provider or alias missing: %s", joined)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestModelAliasProviderRoutingAndOverride(t *testing.T) {
 	var openAIModel, routerModel string
@@ -569,6 +839,10 @@ func TestStreamingClientDisconnectCancelsUpstream(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("client disconnect did not cancel upstream stream")
 	}
+	metrics := scrapeMetrics(t, s)
+	if !strings.Contains(metrics, `error="canceled"`) {
+		t.Fatalf("stream cancellation metric missing: %s", metrics)
+	}
 }
 
 func TestStreamingProviderErrorReportsUnavailableUsage(t *testing.T) {
@@ -634,5 +908,8 @@ func TestAIUnauthorizedAndTimeout(t *testing.T) {
 	w := req(s, http.MethodPost, "chat.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`), true)
 	if w.Code != 504 || w.Header().Get("X-PMQ-Usage-Status") != "unavailable" {
 		t.Fatalf("timeout: %d %s", w.Code, w.Body)
+	}
+	if metrics := scrapeMetrics(t, s); !strings.Contains(metrics, `error="timeout"`) {
+		t.Fatalf("timeout metric missing: %s", metrics)
 	}
 }

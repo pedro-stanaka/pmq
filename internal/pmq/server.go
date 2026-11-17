@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"log"
 	"mime"
@@ -96,6 +98,7 @@ type Config struct {
 	AI                                             AIConfig
 	AIProvider                                     ChatProvider
 	AIRequestTimeout                               time.Duration
+	AITraceEndpoint                                string
 }
 type Server struct {
 	cfg                   Config
@@ -116,6 +119,9 @@ type Server struct {
 	dbErrors              *prometheus.CounterVec
 	aiLimits              AILimits
 	aiAdmission           *aiAdmission
+	aiMetrics             *aiMetrics
+	aiTracer              trace.Tracer
+	aiTracerProvider      *sdktrace.TracerProvider
 }
 
 func New(c Config) (*Server, error) {
@@ -179,6 +185,7 @@ func New(c Config) (*Server, error) {
 		Help: "Number of storage transfers canceled by the request context.",
 	}, []string{"operation"})
 	registry.MustRegister(cancellations)
+	aiMetrics := newAIMetrics(registry)
 	store, err := storage.NewWithRegistry(ctx, c.Storage, registry)
 	if err != nil {
 		return nil, err
@@ -191,6 +198,15 @@ func New(c Config) (*Server, error) {
 			return nil, err
 		}
 	}
+	tracerProvider, err := newAITracer(c.AITraceEndpoint)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("configure AI tracing exporter: %w", err)
+	}
+	var tracerProviderForServer trace.TracerProvider = trace.NewNoopTracerProvider()
+	if tracerProvider != nil {
+		tracerProviderForServer = tracerProvider
+	}
 	aiTimeout := c.AIRequestTimeout
 	if aiTimeout <= 0 {
 		aiTimeout = c.AI.Limits.Timeout
@@ -201,6 +217,7 @@ func New(c Config) (*Server, error) {
 		httpInFlight: httpInFlight, storageHTTP: storageHTTP, dbOperations: dbOperations,
 		dbDuration: dbDuration, dbRowsReturned: dbRowsReturned, dbErrors: dbErrors,
 		aiProvider: aiProvider, aiTimeout: aiTimeout, aiLimits: c.AI.Limits, aiAdmission: newAIAdmission(c.AI.Limits),
+		aiMetrics: aiMetrics, aiTracer: tracerProviderForServer.Tracer("pmq/ai"), aiTracerProvider: tracerProvider,
 	}, nil
 }
 func (s *Server) Close() {
@@ -211,6 +228,9 @@ func (s *Server) Close() {
 	}
 	for _, db := range s.dbs {
 		_ = db.Close()
+	}
+	if s.aiTracerProvider != nil {
+		_ = s.aiTracerProvider.Shutdown(context.Background())
 	}
 }
 func fail(w http.ResponseWriter, status int, code, msg string) {
