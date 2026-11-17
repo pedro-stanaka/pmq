@@ -26,4 +26,10 @@ Deployments are atomic and versioned:
 
 ## Deploying from CI or agents
 
-`pmq deploy` talks to the deployment API (`POST /_pmq/admin/deploy/{name}`) with the bearer deployment token; it accepts a built directory on disk. The token authorizes management — keep it out of browser code and repositories. See the [CLI reference](/reference/cli) and [For AI Agents](/agents).
+`pmq deploy` talks to the deployment API (`POST /_pmq/admin/deploy/{name}`) with the bearer deployment token; it accepts a built directory or a `.zip` archive on disk. The token authorizes management — keep it out of browser code and repositories.
+
+## Deploying from a browser
+
+The bare PMQ domain serves a built-in console: name an app, drop a `.zip`, paste the deploy token, and the upload goes to the same endpoint. The token lives only in that page for the session and is never stored server-side. Operators can also reach the console at `/_pmq/admin/` on the admin origin.
+
+See the [CLI reference](/reference/cli) and [For AI Agents](/agents).

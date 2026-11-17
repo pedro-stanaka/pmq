@@ -20,6 +20,10 @@ Released binaries, Docker images, and an Arch Linux source package are available
 
 `pmq help` lists commands; `pmq version` reports the running release.
 
+## Web console
+
+Open your PMQ domain in a browser (`http://apps.localhost:8080` in the example below) for the built-in deploy console: name an app, drop a `.zip` containing a root `index.html`, paste the deploy token, and the app is live at its own hostname. The token is entered at runtime, kept only in the page, and sent solely to your PMQ instance; the console never stores it. The same page is available to operators at `/_pmq/admin/` on the admin origin, where the reverse proxy exposes admin routes. The `pmq deploy` CLI also accepts a `.zip` archive directly (`pmq deploy app.zip --name APP`), so build artifacts can be shipped without repacking.
+
 ## Quick start
 
 For local development, Go 1.27 or later is required. Build and run on loopback with an explicit development identity:

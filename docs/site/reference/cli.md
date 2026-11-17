@@ -19,9 +19,9 @@ Runs the PMQ server.
 
 Production mode fails to start without a token and trusted-proxy configuration.
 
-## `pmq deploy DIR --name NAME`
+## `pmq deploy DIR|APP.zip --name NAME`
 
-Uploads a built directory (must contain `index.html`) as a new release of `NAME`. Deploying an existing name replaces its entire active file set without a merge or overwrite prompt; persistent data is preserved.
+Uploads a built directory (must contain `index.html`) as a new release of `NAME`. A `.zip` archive is uploaded as-is. Deploying an existing name replaces its entire active file set without a merge or overwrite prompt; persistent data is preserved.
 
 ## `pmq list`
 
