@@ -110,7 +110,51 @@ func serve(args []string) error {
 		return err
 	}
 	storageConfig := storage.Config{Provider: env("PMQ_STORAGE_PROVIDER", "filesystem"), Endpoint: os.Getenv("PMQ_S3_ENDPOINT"), Region: os.Getenv("PMQ_S3_REGION"), Bucket: os.Getenv("PMQ_S3_BUCKET"), AccessKey: os.Getenv("PMQ_S3_ACCESS_KEY"), SecretKey: os.Getenv("PMQ_S3_SECRET_KEY"), SessionToken: os.Getenv("PMQ_S3_SESSION_TOKEN"), Insecure: insecure, PathStyle: pathStyle}
-	s, err := pmq.New(pmq.Config{Storage: storageConfig, Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
+	parseModels := func(raw, envName string) (map[string]string, error) {
+		models := make(map[string]string)
+		for _, entry := range strings.Split(raw, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			alias, model, found := strings.Cut(entry, "=")
+			if !found {
+				alias, model = entry, entry
+			}
+			if strings.TrimSpace(alias) == "" || strings.TrimSpace(model) == "" {
+				return nil, fmt.Errorf("%s entries must be model-id or alias=model-id", envName)
+			}
+			alias, model = strings.TrimSpace(alias), strings.TrimSpace(model)
+			if _, exists := models[alias]; exists {
+				return nil, fmt.Errorf("duplicate model alias %q in %s", alias, envName)
+			}
+			models[alias] = model
+		}
+		return models, nil
+	}
+	aiModels, err := parseModels(os.Getenv("PMQ_AI_MODELS"), "PMQ_AI_MODELS")
+	if err != nil {
+		return err
+	}
+	bedrockModels, err := parseModels(os.Getenv("PMQ_BEDROCK_MODELS"), "PMQ_BEDROCK_MODELS")
+	if err != nil {
+		return err
+	}
+	provider := strings.ToLower(os.Getenv("PMQ_AI_PROVIDER"))
+	aiBaseURL := ""
+	switch provider {
+	case "openai":
+		aiBaseURL = os.Getenv("PMQ_OPENAI_BASE_URL")
+	case "openrouter":
+		aiBaseURL = os.Getenv("PMQ_OPENROUTER_BASE_URL")
+	case "bedrock":
+		aiBaseURL = os.Getenv("PMQ_BEDROCK_BASE_URL")
+	}
+	aiConfig := pmq.AIConfig{Provider: provider, APIKey: os.Getenv("OPENAI_API_KEY"), BaseURL: aiBaseURL, AWSRegion: env("AWS_REGION", os.Getenv("AWS_DEFAULT_REGION")), Models: aiModels, BedrockModels: bedrockModels}
+	if provider == "openrouter" {
+		aiConfig.APIKey = os.Getenv("OPENROUTER_API_KEY")
+	}
+	s, err := pmq.New(pmq.Config{Storage: storageConfig, AI: aiConfig, Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
 	if err != nil {
 		return err
 	}

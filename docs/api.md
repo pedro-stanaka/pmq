@@ -8,7 +8,21 @@ All app endpoints use the deployed app's hostname and authenticated identity. Re
 - `PUT /_pmq/db/{collection}/{id}`: replace its entire data object; return document or 404.
 - `DELETE /_pmq/db/{collection}/{id}`: delete or return 404.
 
-A document has `id`, `collection`, `data`, `createdAt`, and `updatedAt`. There is no filtering, SQL, or partial update. Mutating app requests require an Origin matching the request Host (HTTPS in production). `/_pmq/ai/*` remains reserved and returns 404.
+A document has `id`, `collection`, `data`, `createdAt`, and `updatedAt`. There is no filtering, SQL, or partial update. Mutating app requests require an Origin matching the request Host (HTTPS in production).
+
+## AI Chat Completions
+
+When `PMQ_AI_PROVIDER` is configured, `POST /_pmq/ai/chat/completions` accepts a text-only, non-streaming subset of Chat Completions:
+
+```json
+{"model":"fast","messages":[{"role":"user","content":"Hello"}],"max_tokens":256,"temperature":0.7}
+```
+
+Allowed fields: `model`, `messages`, `temperature` (0–2), `top_p` (0–1), `max_tokens` (1–32768, default 1024), and `stop`. Message roles are `system`, `user`, or `assistant`, and content must be nonempty text. The normalized response includes the standard completion ID, object, created timestamp, public model alias, choices, and usage. Streaming, tools, multimodal messages, and unknown fields are rejected. Request bodies are capped at 1 MiB, provider responses at 2 MiB, and calls have a 45-second deadline.
+
+Provider setup is server-only: `PMQ_AI_PROVIDER=openai` uses `OPENAI_API_KEY`; `openrouter` uses `OPENROUTER_API_KEY`; both require a `PMQ_AI_MODELS` allowlist of `alias=model-id` entries. `bedrock` uses the AWS SDK credential chain and requires `PMQ_BEDROCK_MODELS` entries in the same alias format. Only configured models are sent upstream. PMQ uses the regional Bedrock Runtime Chat Completions endpoint; only endpoint-compatible models should be configured. See the README for configuration and examples. No credential or prompt contents are logged.
+
+Errors use the common `{"error":{"code":"...","message":"..."}}` contract: invalid requests return 400, an oversized request 413, an unconfigured provider 503, an upstream timeout 504, and other upstream failures 502. The route follows the same per-app hostname, proxy identity, and Origin rules as the document API. Application code should call it through the relative URL `/_pmq/ai/chat/completions`.
 
 ## Object storage
 

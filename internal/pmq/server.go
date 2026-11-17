@@ -93,6 +93,9 @@ type Config struct {
 	Dev                                            bool
 	TrustedProxies                                 []netip.Prefix
 	Storage                                        storage.Config
+	AI                                             AIConfig
+	AIProvider                                     ChatProvider
+	AIRequestTimeout                               time.Duration
 }
 type Server struct {
 	cfg                   Config
@@ -101,6 +104,8 @@ type Server struct {
 	storage               *storage.Store
 	metrics               *prometheus.Registry
 	transferCancellations *prometheus.CounterVec
+	aiProvider            ChatProvider
+	aiTimeout             time.Duration
 }
 
 func New(c Config) (*Server, error) {
@@ -152,7 +157,19 @@ func New(c Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry, transferCancellations: cancellations}, nil
+	aiProvider := c.AIProvider
+	if aiProvider == nil {
+		aiProvider, err = newAIProvider(c.AI)
+		if err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+	}
+	aiTimeout := c.AIRequestTimeout
+	if aiTimeout <= 0 {
+		aiTimeout = 45 * time.Second
+	}
+	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry, transferCancellations: cancellations, aiProvider: aiProvider, aiTimeout: aiTimeout}, nil
 }
 func (s *Server) Close() {
 	s.mu.Lock()
@@ -254,6 +271,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.documents(w, r, app)
 		} else if r.URL.Path == "/_pmq/storage" || strings.HasPrefix(r.URL.Path, "/_pmq/storage/") {
 			s.objects(w, r, app)
+		} else if strings.HasPrefix(r.URL.Path, "/_pmq/ai/") {
+			s.ai(w, r)
 		} else {
 			fail(w, 404, "not_found", "Endpoint not found")
 		}

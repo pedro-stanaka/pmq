@@ -3,6 +3,9 @@ const error = document.querySelector('#error');
 const notes = document.querySelector('#notes');
 const fileForm = document.querySelector('#file-form');
 const files = document.querySelector('#files');
+const aiForm = document.querySelector('#ai-form');
+const aiError = document.querySelector('#ai-error');
+const answer = document.querySelector('#answer');
 async function api(url, options) {
   const response = await fetch(url, options);
   const body = response.headers.get('Content-Type')?.includes('application/json') ? await response.json() : null;
@@ -64,6 +67,19 @@ fileForm.addEventListener('submit', async event => {
     fileForm.reset();
     await refreshFiles();
   } catch (e) { error.textContent = e.message; }
+});
+aiForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  answer.textContent = '';
+  try {
+    const result = await api('/_pmq/ai/chat/completions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: document.querySelector('#model').value, messages: [{role: 'user', content: document.querySelector('#prompt').value}]}),
+    });
+    answer.textContent = result.choices?.[0]?.message?.content || '';
+    aiError.textContent = '';
+  } catch (e) { aiError.textContent = e.message; }
 });
 refresh();
 refreshFiles();

@@ -2,7 +2,7 @@
 
 **Build it. Drop it. Run it.**
 
-PMQ hosts static applications, per-app JSON documents, and per-app object storage in one Go process. Deploy a built directory over HTTP and reach it at its own hostname. SQLite and release files live on local disk. PMQ does not run application backend code or provide user accounts, hard tenant isolation, or AI access.
+PMQ hosts static applications, per-app JSON documents, object storage, and an optional OpenAI-compatible AI gateway in one Go process. Deploy a built directory over HTTP and reach it at its own hostname. SQLite and release files live on local disk. PMQ does not run application backend code or provide user accounts or hard tenant isolation.
 
 **PMQ is a full-trust system. Deploy it only when you trust every user who can access PMQ and its applications.** It is designed for a trusted group, not mutually untrusted users. Authentication restricts access to that group; it does not provide per-user data isolation.
 
@@ -89,8 +89,47 @@ Storage uploads and downloads stream through bounded readers and writers; upload
 
 Back up the local `objects/` directory with the rest of PMQ data. With S3, objects live outside that directory: configure bucket backups or versioning and test restoring them separately. Changing providers does not migrate existing objects. Keep the bucket and local PMQ data in a coordinated backup and restore plan.
 
+## AI Chat Completions gateway
+
+The optional `POST /_pmq/ai/chat/completions` endpoint forwards a documented, non-streaming text subset of the OpenAI Chat Completions contract. It uses the app's same origin and existing proxy authentication and write-Origin checks. Provider selection and credentials are server-side; never put provider keys in app JavaScript. The gateway defaults to disabled.
+
+Configure exactly one provider before starting PMQ:
+
+```sh
+# OpenAI
+PMQ_AI_PROVIDER=openai
+OPENAI_API_KEY=...
+PMQ_AI_MODELS='fast=gpt-4o-mini'
+
+# Or OpenRouter
+PMQ_AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+PMQ_AI_MODELS='fast=openai/gpt-4o-mini'
+
+# Or Amazon Bedrock using the AWS SDK credential chain (IAM role, SSO/profile,
+# environment credentials, or workload credentials)
+PMQ_AI_PROVIDER=bedrock
+AWS_REGION=us-east-1
+PMQ_BEDROCK_MODELS='fast=openai.gpt-oss-20b-1:0'
+```
+
+`PMQ_AI_MODELS` is a required comma-separated allowlist of `alias=model-id` entries for OpenAI and OpenRouter. Apps send the alias in `model`; PMQ sends the configured model ID upstream. Optional `PMQ_OPENAI_BASE_URL` and `PMQ_OPENROUTER_BASE_URL` allow a trusted compatible endpoint; production URLs must use HTTPS. For Bedrock, `PMQ_BEDROCK_MODELS` is a required comma-separated allowlist of `alias=model-id` or `model-id` entries. Only listed models are sent upstream, and the AWS Chat Completions endpoint may support fewer models than Converse; consult the [Bedrock model card's supported API list](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions.html). PMQ uses the recommended regional `bedrock-runtime` endpoint and standard AWS credential resolution, with no static AWS secrets required. For deployment-specific endpoints, set `PMQ_BEDROCK_BASE_URL`. See the [official OpenAI Go SDK](https://github.com/openai/openai-go) for its maintained provider client and Bedrock SigV4 integration.
+
+Example request from application JavaScript (same-origin relative URL):
+
+```js
+const response = await fetch('/_pmq/ai/chat/completions', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({model: 'fast', messages: [{role: 'user', content: 'Hello'}]}),
+});
+const completion = await response.json();
+```
+
+Supported fields are `model`, text-only `messages` (`system`, `user`, `assistant`), `temperature`, `top_p`, `max_tokens`, and `stop`. If omitted, `max_tokens` defaults to 1024; values above 32768 are rejected. Streaming, tools, multimodal content, and provider-specific extensions are not supported. Bodies are limited to 1 MiB, upstream responses to 2 MiB, and provider requests time out after 45 seconds. See [AI API details](docs/api.md#ai-chat-completions).
+
 ## Architecture and operations
 
 A validated hostname selects an app; its active immutable release serves files, while a separate SQLite database stores documents. Deployments stage and validate archives then atomically replace a release pointer. `pmq status APP` and `pmq releases APP` inspect active and retained releases; `pmq rollback APP` activates the previous release, while `pmq rollback APP --release ID` selects a specific release. Releases are retained indefinitely by default. Pruning is explicit: `pmq prune APP --keep 5` keeps the five newest releases, the active release, and the newest other release as a rollback target when one exists. Do not prune a release you may need to roll back to. All management commands use the deployment bearer token. See [architecture](docs/architecture.md). Data layout version 1 stores releases under `data/apps/` and databases under `data/state/`. Back up the **entire data directory**, including SQLite WAL files. Stop PMQ for a consistent filesystem backup, or use a SQLite-aware online backup plus a coordinated release snapshot. Test restores.
 
-This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. The AI route remains reserved and returns 404. A future milestone may add an AI gateway; OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
+This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
