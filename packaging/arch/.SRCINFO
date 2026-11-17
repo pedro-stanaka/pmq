@@ -9,6 +9,6 @@ pkgbase = pmq
 	makedepends = go
 	options = !debug
 	source = pmq-0.1.0.tar.gz::https://github.com/pedro-stanaka/pmq/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 70ac9f59b854625fdec05bd4b8582793baba436aedb1714607ffbb5f4cdeb9b8
 
 pkgname = pmq

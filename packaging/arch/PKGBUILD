@@ -15,7 +15,7 @@ options=(!debug)
 # Built from the pinned tagged source archive with the Go toolchain; no
 # prebuilt binary. update.sh fills in the checksum after the tag is published.
 source=("$pkgname-$pkgver.tar.gz::https://github.com/pedro-stanaka/pmq/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('70ac9f59b854625fdec05bd4b8582793baba436aedb1714607ffbb5f4cdeb9b8')
 
 build() {
   cd "$pkgname-$pkgver"
