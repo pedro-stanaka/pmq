@@ -26,3 +26,6 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build --workspace @pmq-dev/example-vite
+      - run: npm ci --prefix skills/pmq-app-builder/assets/templates/react-vite-ts
+      - run: npm run build --prefix skills/pmq-app-builder/assets/templates/react-vite-ts
+      - run: scripts/smoke-test.sh
