@@ -165,3 +165,5 @@ This is a single-node system for a fully trusted group, not a security sandbox. 
 For private LAN/tailnet ingress, split DNS, and reachability checks, see [private ingress](docs/proxy/private-ingress.md).
 
 For the optional production Compose/Komodo recipe and offline backup/restore drill, see [production and recovery](docs/proxy/production.md).
+
+Agents can use the [deployment and operations skill](skills/pmq-deploy/SKILL.md) for build, verification, rollback, and troubleshooting.
