@@ -17,7 +17,7 @@ Create a DNS record for `*.slopper.tanaka.dev.br` pointing at Caddy (and an apex
 
 Build or install Caddy with `github.com/caddy-dns/cloudflare`; stock Caddy builds do not contain it. For a reproducible build matching the validation below, use `xcaddy build v2.11.9 --with github.com/caddy-dns/cloudflare@v0.2.4`. The provider's documented module name is `dns.providers.cloudflare`. Give Caddy a scoped Cloudflare API token with Zone:Read and DNS:Edit permissions for the `slopper.tanaka.dev.br` zone, and expose it as `CLOUDFLARE_API_TOKEN`. Keep the token out of the Caddyfile and source control. See the [Cloudflare provider module](https://github.com/caddy-dns/cloudflare) and [Caddy DNS challenge docs](https://caddyserver.com/docs/automatic-https#dns-challenge).
 
-Caddy's automatic HTTPS obtains certificates for each configured site. The wildcard site in [the example Caddyfile](../../examples/caddy/Caddyfile) requires DNS-01; the operator hostname is covered by the same wildcard certificate. ACME issuance is not exercised by config validation because that requires live DNS and Cloudflare credentials.
+Caddy's automatic HTTPS obtains certificates for each configured site. The wildcard site in [the example Caddyfile](https://github.com/pedro-stanaka/pmq/blob/main/examples/caddy/Caddyfile) requires DNS-01; the operator hostname is covered by the same wildcard certificate. ACME issuance is not exercised by config validation because that requires live DNS and Cloudflare credentials.
 
 ## Authentication and request routing
 

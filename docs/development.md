@@ -8,7 +8,7 @@ For a trusted local HTTPS certificate and explicit host entries, see “Local HT
 
 ## Packaging
 
-Tagged releases are built by GoReleaser (`.goreleaser.yaml`, see [distribution.md](distribution.md)). Validate locally without publishing:
+Tagged releases are built by GoReleaser (`.goreleaser.yaml`, see [distribution.md](https://github.com/pedro-stanaka/pmq/blob/main/docs/distribution.md)). Validate locally without publishing:
 
 ```sh
 goreleaser check                      # validate configuration

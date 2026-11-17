@@ -1,0 +1,3 @@
+# Observability
+
+<!-- @include: ../../observability.md -->

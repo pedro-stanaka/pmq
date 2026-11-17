@@ -1,6 +1,6 @@
 # Production and recovery
 
-Use the optional [production Compose example](../../examples/production/compose.yaml) with an existing private Caddy/SSO installation; PMQ does not require Komodo. Follow [private ingress](private-ingress.md) and the [Caddy recipe](caddy.md) first. All users must be trusted. Do not enable dev mode in production.
+Use the optional [production Compose example](https://github.com/pedro-stanaka/pmq/blob/main/examples/production/compose.yaml) with an existing private Caddy/SSO installation; PMQ does not require Komodo. Follow [private ingress](private-ingress.md) and the [Caddy recipe](caddy.md) first. All users must be trusted. Do not enable dev mode in production.
 
 ## Deploy with Compose or Komodo
 

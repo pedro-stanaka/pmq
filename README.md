@@ -6,6 +6,10 @@ PMQ hosts static applications, per-app JSON documents, object storage, and an op
 
 **PMQ is a full-trust system. Deploy it only when you trust every user who can access PMQ and its applications.** It is designed for a trusted group, not mutually untrusted users. Authentication restricts access to that group; it does not provide per-user data isolation.
 
+## Documentation
+
+The full documentation lives in [`docs/`](docs) and is also published as a searchable website at **https://pedro-stanaka.github.io/pmq/** (VitePress, source in [`docs/site/`](docs/site); requires GitHub Pages with the “GitHub Actions” source enabled in repository settings — see [docs.yml](.github/workflows/docs.yml)). Start with [docs/distribution.md](docs/distribution.md) for installation or [docs/api.md](docs/api.md) for the HTTP contract.
+
 ## Install
 
 Released binaries, Docker images, and an Arch Linux source package are available — see [docs/distribution.md](docs/distribution.md):

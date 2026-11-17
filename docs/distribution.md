@@ -62,7 +62,7 @@ docker run --rm -p 8080:8080 -v pmq-data:/data \
   ghcr.io/pedro-stanaka/pmq:latest
 ```
 
-For a production setup with a reverse proxy, see the [compose example](https://github.com/pedro-stanaka/pmq/blob/main/compose.yaml) and [docs/proxy/production.md](proxy/production.md).
+for a production setup with a reverse proxy, see the [compose example](https://github.com/pedro-stanaka/pmq/blob/main/compose.yaml) and [production and recovery](https://github.com/pedro-stanaka/pmq/blob/main/docs/proxy/production.md).
 
 Image tag policy:
 
