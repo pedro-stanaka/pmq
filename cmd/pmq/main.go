@@ -16,11 +16,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/pmq-dev/pmq/internal/pmq"
+	"github.com/pmq-dev/pmq/internal/storage"
 )
 
 var version = "dev"
@@ -91,7 +93,16 @@ func serve(args []string) error {
 		}
 		ps = append(ps, p)
 	}
-	s, err := pmq.New(pmq.Config{Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
+	insecure, err := storageBool("PMQ_S3_INSECURE")
+	if err != nil {
+		return err
+	}
+	pathStyle, err := storageBool("PMQ_S3_PATH_STYLE")
+	if err != nil {
+		return err
+	}
+	storageConfig := storage.Config{Provider: env("PMQ_STORAGE_PROVIDER", "filesystem"), Endpoint: os.Getenv("PMQ_S3_ENDPOINT"), Region: os.Getenv("PMQ_S3_REGION"), Bucket: os.Getenv("PMQ_S3_BUCKET"), AccessKey: os.Getenv("PMQ_S3_ACCESS_KEY"), SecretKey: os.Getenv("PMQ_S3_SECRET_KEY"), SessionToken: os.Getenv("PMQ_S3_SESSION_TOKEN"), Insecure: insecure, PathStyle: pathStyle}
+	s, err := pmq.New(pmq.Config{Storage: storageConfig, Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
 	if err != nil {
 		return err
 	}
@@ -104,7 +115,9 @@ func serve(args []string) error {
 	fmt.Fprintln(os.Stderr, "PMQ listening on", ln.Addr())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -115,10 +128,23 @@ func serve(args []string) error {
 	} else {
 		err = srv.Serve(ln)
 	}
+	stop()
+	<-shutdownDone
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+func storageBool(name string) (bool, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return b, nil
 }
 func clientFlags(f *flag.FlagSet) (*string, *string) {
 	return f.String("server", env("PMQ_SERVER", "http://127.0.0.1:8080"), "server URL"), f.String("token", env("PMQ_DEPLOY_TOKEN", ""), "deployment token")
