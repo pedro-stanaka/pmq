@@ -77,6 +77,8 @@ For an existing Caddy reverse proxy, wildcard TLS, SSO identity forwarding, host
 
 For Docker, copy `.env.example` to `.env`, replace all values, especially the trusted address with the proxy source actually visible **inside the container**, then run `docker compose up -d --build`. The port is published on host loopback only. A host proxy may appear at a Docker gateway rather than `127.0.0.1`; verify this for your network. Trusting that gateway can also trust other host processes able to connect to the published port, so restrict access accordingly or use a dedicated proxy-to-PMQ network. Compose uses production mode, so a host proxy is required. No proxy service is included.
 
+For a shared Google login across PMQ app subdomains using the existing Caddy Security portal, see the [Google SSO integration](docs/proxy/google-sso.md). It documents cookie scope, identity-header handling, trusted-proxy configuration, logout/expiry, and a manual end-to-end test matrix.
+
 ## Object storage configuration
 
 PMQ initializes a Thanos objstore bucket at startup. The default `PMQ_STORAGE_PROVIDER=filesystem` stores objects under `data/objects/` (or `PMQ_DATA_DIR/objects/`) and needs no cloud credentials. Apps can upload, retrieve, inspect, list, and delete their own objects through `/_pmq/storage/*`; see [API](docs/api.md). Requests use the trusted proxy identity and Origin checks used by document writes and are scoped by the validated application hostname. Bucket metrics are registered in the process Prometheus registry. `GET /_pmq/admin/metrics` requires the deployment bearer token and should also be restricted at the proxy.

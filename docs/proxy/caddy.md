@@ -2,6 +2,8 @@
 
 This recipe adds PMQ as an upstream to an **existing Caddy instance**. It does not add another PMQ container or change any other Caddy site. The example uses `*.slopper.tanaka.dev.br`; set `PMQ_DOMAIN` to the domain you control.
 
+For the caddy-security Google SSO portal, shared cookie scope, authenticated identity header, and end-to-end test matrix, see [Google SSO](google-sso.md). That recipe uses caddy-security `authorize`; the generic forward-auth sample below is for an existing external auth service.
+
 The application and operator routes use separate hostnames:
 
 - `APP.PMQ_DOMAIN` authenticates every request through your existing SSO/forward-auth service. `/_pmq/admin/*` is blocked at Caddy on every app hostname.
