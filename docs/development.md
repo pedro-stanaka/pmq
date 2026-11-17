@@ -8,7 +8,9 @@ For a trusted local HTTPS certificate and explicit host entries, see “Local HT
 
 ## S3 integration test
 
-The storage contract always runs against a temporary filesystem bucket. To also run it against an existing disposable S3-compatible bucket, provide credentials with list, read, write, and delete access, then run:
+The storage contract always runs against a temporary filesystem bucket. CI also runs `scripts/test-s3-contract.sh` against a disposable local Moto S3 emulator. To reproduce that test, install Python and `moto[server]==5.2.5` in a virtual environment, then run the script. Moto exercises the S3-compatible protocol but does not replace testing against your chosen provider.
+
+To also run the contract against an existing disposable S3-compatible bucket, provide credentials with list, read, write, and delete access, then run:
 
 ```sh
 PMQ_TEST_S3_ENDPOINT=127.0.0.1:9000 PMQ_TEST_S3_REGION=us-east-1 \
