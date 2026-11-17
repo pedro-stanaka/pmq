@@ -333,6 +333,12 @@ External AI providers should be mocked in automated tests.
 
 Tests must not depend on the author's personal homelab.
 
+Extra rules for testing:
+
+* Unit tests that only enforce implementation details (heavy mocking is a smell)
+* Have some layer of e2e testing to have a good and healthy test pyramid.
+
+
 ## Coding style
 
 Write idiomatic Go.
@@ -363,6 +369,8 @@ Avoid:
 - Overly generic configuration systems.
 
 Comments should explain why something exists, not merely restate the code.
+
+Also rely on known techniques like Pooling, pre-allocation, prefer concrete types.
 
 ## Dependencies
 
