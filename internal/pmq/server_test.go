@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -489,6 +491,174 @@ func TestStorageHTTPCRUDAndIsolation(t *testing.T) {
 	if w.Code != 413 {
 		t.Fatalf("large %d %s", w.Code, w.Body)
 	}
+}
+
+func TestStorageRangeAndConditionalRequests(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "range-app", "app")
+	host := "range-app.apps.localhost"
+	call := func(method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "http://"+host+path, strings.NewReader(body))
+		r.Host = host
+		r.Header.Set("Origin", "http://"+host)
+		for name, value := range headers {
+			r.Header.Set(name, value)
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("PUT", "/_pmq/storage/range.txt", "0123456789", nil); w.Code != 201 {
+		t.Fatal(w.Code, w.Body)
+	}
+	for _, tc := range []struct {
+		rangeValue string
+		want       string
+	}{
+		{"bytes=2-5", "2345"},
+		{"bytes=7-", "789"},
+		{"bytes=-3", "789"},
+		{"bytes=-99", "0123456789"},
+	} {
+		w := call("GET", "/_pmq/storage/range.txt", "", map[string]string{"Range": tc.rangeValue})
+		if w.Code != http.StatusPartialContent || w.Body.String() != tc.want || w.Header().Get("Content-Length") != fmt.Sprint(len(tc.want)) {
+			t.Errorf("range %q: status=%d body=%q length=%s", tc.rangeValue, w.Code, w.Body.String(), w.Header().Get("Content-Length"))
+		}
+		if !strings.HasPrefix(w.Header().Get("Content-Range"), "bytes ") {
+			t.Errorf("range %q missing Content-Range: %q", tc.rangeValue, w.Header().Get("Content-Range"))
+		}
+	}
+	if w := call("GET", "/_pmq/storage/range.txt", "", map[string]string{"Range": "bytes=20-30"}); w.Code != 416 || w.Header().Get("Content-Range") != "bytes */10" {
+		t.Fatalf("unsatisfiable range: %d %v %s", w.Code, w.Header(), w.Body)
+	}
+	if w := call("HEAD", "/_pmq/storage/range.txt", "", map[string]string{"Range": "bytes=0-1"}); w.Code != 200 || w.Header().Get("Content-Length") != "10" || w.Body.Len() != 0 {
+		t.Fatalf("range HEAD: %d %v %s", w.Code, w.Header(), w.Body)
+	}
+	if w := call("GET", "/_pmq/storage/range.txt", "", map[string]string{"If-None-Match": "*"}); w.Code != 304 {
+		t.Fatalf("If-None-Match: %d %s", w.Code, w.Body)
+	}
+	if w := call("GET", "/_pmq/storage/range.txt", "", map[string]string{"If-Match": `"wrong"`}); w.Code != 412 {
+		t.Fatalf("If-Match: %d %s", w.Code, w.Body)
+	}
+	meta := call("HEAD", "/_pmq/storage/range.txt", "", nil)
+	if modified := meta.Header().Get("Last-Modified"); modified == "" {
+		t.Fatal("missing Last-Modified")
+	} else if w := call("GET", "/_pmq/storage/range.txt", "", map[string]string{"If-Modified-Since": modified}); w.Code != 304 {
+		t.Fatalf("If-Modified-Since: %d %s", w.Code, w.Body)
+	}
+	if w := call("GET", "/_pmq/storage/range.txt", "", map[string]string{"Range": "bytes=0-1", "If-Range": `"different"`}); w.Code != 200 || w.Body.String() != "0123456789" {
+		t.Fatalf("If-Range mismatch should return full body: %d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestStorageLargeTransfersStreamInChunks(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "stream-app", "app")
+	host := "stream-app.apps.localhost"
+	const size = 16 << 20
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	request := httptest.NewRequest("PUT", "http://"+host+"/_pmq/storage/large.bin", &generatedBody{remaining: size})
+	request.Host = host
+	request.Header.Set("Origin", "http://"+host)
+	w := &discardResponse{header: make(http.Header)}
+	s.ServeHTTP(w, request)
+	if w.status != http.StatusCreated {
+		t.Fatalf("stream upload: %d", w.status)
+	}
+	request = httptest.NewRequest("GET", "http://"+host+"/_pmq/storage/large.bin", nil)
+	request.Host = host
+	w = &discardResponse{header: make(http.Header)}
+	s.ServeHTTP(w, request)
+	if w.status != http.StatusOK || w.written != size || w.maxWrite > 1<<20 {
+		t.Fatalf("stream download: status=%d bytes=%d maxWrite=%d", w.status, w.written, w.maxWrite)
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= uint64(size/2) {
+		t.Fatalf("large transfer allocated %d bytes for %d-byte object; expected bounded buffering", allocated, size)
+	}
+}
+
+func TestStorageUploadCancellationMetric(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "cancel-app", "app")
+	r, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest("PUT", "http://cancel-app.apps.localhost/_pmq/storage/cancelled", strings.NewReader("partial")).WithContext(r)
+	request.Host = "cancel-app.apps.localhost"
+	request.Header.Set("Origin", "http://cancel-app.apps.localhost")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, request)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("canceled upload response: %d %s", w.Code, w.Body)
+	}
+	if w := req(s, "PUT", "cancel-app.apps.localhost", "/_pmq/storage/readable", strings.NewReader("body"), true); w.Code != http.StatusCreated {
+		t.Fatal(w.Code, w.Body)
+	}
+	downloadCtx, stopDownload := context.WithCancel(context.Background())
+	downloading := httptest.NewRequest("GET", "http://cancel-app.apps.localhost/_pmq/storage/readable", nil).WithContext(downloadCtx)
+	downloading.Host = "cancel-app.apps.localhost"
+	writer := &cancelResponse{header: make(http.Header), cancel: stopDownload}
+	s.ServeHTTP(writer, downloading)
+	metrics := httptest.NewRequest("GET", "http://localhost/_pmq/admin/metrics", nil)
+	metrics.Header.Set("Authorization", "Bearer secret")
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, metrics)
+	if !strings.Contains(w.Body.String(), `pmq_storage_transfer_cancellations_total{operation="upload"} 1`) || !strings.Contains(w.Body.String(), `pmq_storage_transfer_cancellations_total{operation="download"} 1`) {
+		t.Fatalf("cancellation metric missing: %s", w.Body)
+	}
+}
+
+type cancelResponse struct {
+	header http.Header
+	cancel context.CancelFunc
+}
+
+func (w *cancelResponse) Header() http.Header { return w.header }
+func (w *cancelResponse) WriteHeader(int)     {}
+func (w *cancelResponse) Write([]byte) (int, error) {
+	w.cancel()
+	return 0, io.ErrClosedPipe
+}
+
+type generatedBody struct{ remaining int64 }
+
+func (b *generatedBody) Read(p []byte) (int, error) {
+	if b.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > b.remaining {
+		n = b.remaining
+	}
+	for i := 0; i < int(n); i++ {
+		p[i] = 'x'
+	}
+	b.remaining -= n
+	return int(n), nil
+}
+func (b *generatedBody) Close() error { return nil }
+
+type discardResponse struct {
+	header   http.Header
+	status   int
+	written  int64
+	maxWrite int
+}
+
+func (w *discardResponse) Header() http.Header    { return w.header }
+func (w *discardResponse) WriteHeader(status int) { w.status = status }
+func (w *discardResponse) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if len(p) > w.maxWrite {
+		w.maxWrite = len(p)
+	}
+	w.written += int64(len(p))
+	return len(p), nil
 }
 
 func TestStorageMetricsScrapeRestrictedAndLowCardinality(t *testing.T) {

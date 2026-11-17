@@ -156,6 +156,18 @@ func (a *App) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	}
 	return r, err
 }
+
+func (a *App) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	name, err := a.key(key)
+	if err != nil {
+		return nil, err
+	}
+	r, err := a.bucket.GetRange(ctx, name, offset, length)
+	if err != nil && a.bucket.IsObjNotFoundErr(err) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
 func (a *App) Delete(ctx context.Context, key string) error {
 	name, err := a.key(key)
 	if err != nil {
@@ -173,6 +185,7 @@ type Object struct {
 	Size         int64  `json:"size"`
 	LastModified string `json:"lastModified"`
 	ContentType  string `json:"contentType,omitempty"`
+	ETag         string `json:"etag,omitempty"`
 }
 
 func (a *App) Head(ctx context.Context, key string) (Object, error) {
@@ -187,7 +200,11 @@ func (a *App) Head(ctx context.Context, key string) (Object, error) {
 	if err != nil {
 		return Object{}, err
 	}
-	return Object{Key: key, Size: attrs.Size, LastModified: attrs.LastModified.UTC().Format("2006-01-02T15:04:05Z07:00"), ContentType: contentType(key)}, nil
+	object := Object{Key: key, Size: attrs.Size, LastModified: attrs.LastModified.UTC().Format("2006-01-02T15:04:05Z07:00"), ContentType: contentType(key)}
+	if attrs.Version != nil && attrs.Version.Type == objstore.ETag && attrs.Version.Value != "" {
+		object.ETag = `"` + strings.ReplaceAll(attrs.Version.Value, `"`, `\"`) + `"`
+	}
+	return object, nil
 }
 
 func contentType(key string) string {

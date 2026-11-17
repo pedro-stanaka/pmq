@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io"
@@ -94,11 +95,12 @@ type Config struct {
 	Storage                                        storage.Config
 }
 type Server struct {
-	cfg     Config
-	mu      sync.Mutex
-	dbs     map[string]*sql.DB
-	storage *storage.Store
-	metrics *prometheus.Registry
+	cfg                   Config
+	mu                    sync.Mutex
+	dbs                   map[string]*sql.DB
+	storage               *storage.Store
+	metrics               *prometheus.Registry
+	transferCancellations *prometheus.CounterVec
 }
 
 func New(c Config) (*Server, error) {
@@ -141,11 +143,16 @@ func New(c Config) (*Server, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	registry := prometheus.NewRegistry()
+	cancellations := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pmq_storage_transfer_cancellations_total",
+		Help: "Number of storage transfers canceled by the request context.",
+	}, []string{"operation"})
+	registry.MustRegister(cancellations)
 	store, err := storage.NewWithRegistry(ctx, c.Storage, registry)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry}, nil
+	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry, transferCancellations: cancellations}, nil
 }
 func (s *Server) Close() {
 	s.mu.Lock()
@@ -313,8 +320,12 @@ func (s *Server) objects(w http.ResponseWriter, r *http.Request, app string) {
 			return
 		}
 		body := &limitedReadCloser{Reader: r.Body}
+		defer body.Close()
 		e := store.Upload(r.Context(), key, body)
 		if e != nil {
+			if r.Context().Err() != nil {
+				s.transferCancellations.WithLabelValues("upload").Inc()
+			}
 			var max *http.MaxBytesError
 			if errors.As(e, &max) {
 				fail(w, 413, "object_too_large", "Object exceeds 32 MiB limit")
@@ -329,29 +340,84 @@ func (s *Server) objects(w http.ResponseWriter, r *http.Request, app string) {
 	case http.MethodGet, http.MethodHead:
 		meta, e := store.Head(r.Context(), key)
 		if e != nil {
+			if r.Context().Err() != nil {
+				s.transferCancellations.WithLabelValues("download").Inc()
+			}
 			storageError(w, e)
 			return
 		}
+		modified, _ := time.Parse(time.RFC3339, meta.LastModified)
+		w.Header().Set("Content-Type", meta.ContentType)
+		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
+		if !modified.IsZero() {
+			w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+		}
+		if meta.ETag != "" {
+			w.Header().Set("ETag", meta.ETag)
+		}
+		if matchesIfMatch(r.Header.Get("If-Match"), meta.ETag) == false && r.Header.Get("If-Match") != "" {
+			w.Header().Del("Content-Length")
+			fail(w, http.StatusPreconditionFailed, "precondition_failed", "If-Match condition failed")
+			return
+		}
+		if raw := r.Header.Get("If-Unmodified-Since"); raw != "" {
+			if date, parseErr := http.ParseTime(raw); parseErr == nil && !modified.IsZero() && modified.Truncate(time.Second).After(date) {
+				w.Header().Del("Content-Length")
+				fail(w, http.StatusPreconditionFailed, "precondition_failed", "If-Unmodified-Since condition failed")
+				return
+			}
+		}
+		if matchesIfNoneMatch(r.Header.Get("If-None-Match"), meta.ETag) || (r.Header.Get("If-None-Match") == "" && notModifiedSince(r.Header.Get("If-Modified-Since"), modified)) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		offset, length, partial := int64(0), meta.Size, false
+		if raw := r.Header.Get("Range"); r.Method == http.MethodGet && raw != "" && (r.Header.Get("If-Range") == "" || ifRangeMatches(r.Header.Get("If-Range"), meta.ETag, modified)) {
+			var valid bool
+			offset, length, valid = parseByteRange(raw, meta.Size)
+			if !valid {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", meta.Size))
+				w.Header().Del("Content-Length")
+				fail(w, http.StatusRequestedRangeNotSatisfiable, "invalid_range", "Requested byte range is not satisfiable")
+				return
+			}
+			partial = true
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, meta.Size))
+			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		}
 		var body io.ReadCloser
 		if r.Method == http.MethodGet {
-			body, e = store.Get(r.Context(), key)
+			if partial {
+				body, e = store.GetRange(r.Context(), key, offset, length)
+			} else {
+				body, e = store.Get(r.Context(), key)
+			}
 			if e != nil {
+				if r.Context().Err() != nil {
+					s.transferCancellations.WithLabelValues("download").Inc()
+				}
+				clearObjectHeaders(w)
 				storageError(w, e)
 				return
 			}
 			defer body.Close()
 		}
-		w.Header().Set("Content-Type", meta.ContentType)
-		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
-		if modified, parseErr := time.Parse(time.RFC3339, meta.LastModified); parseErr == nil {
-			w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
-		}
 		if r.Method == http.MethodHead {
-			w.WriteHeader(200)
+			if partial {
+				w.WriteHeader(http.StatusPartialContent)
+			} else {
+				w.WriteHeader(http.StatusOK)
+			}
 			return
 		}
-		w.WriteHeader(200)
-		_, _ = io.Copy(w, body)
+		if partial {
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		if _, e = io.Copy(w, body); e != nil && r.Context().Err() != nil {
+			s.transferCancellations.WithLabelValues("download").Inc()
+		}
 	case http.MethodDelete:
 		e := store.Delete(r.Context(), key)
 		if e != nil {
@@ -373,6 +439,78 @@ func (l *limitedReadCloser) Close() error {
 	}
 	return nil
 }
+
+func parseByteRange(value string, size int64) (offset, length int64, ok bool) {
+	if size <= 0 || !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
+		return 0, 0, false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "bytes="), "-")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	if parts[0] == "" {
+		suffix, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || suffix <= 0 {
+			return 0, 0, false
+		}
+		if suffix > size {
+			suffix = size
+		}
+		return size - suffix, suffix, true
+	}
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || start < 0 || start >= size {
+		return 0, 0, false
+	}
+	end := size - 1
+	if parts[1] != "" {
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || end < start {
+			return 0, 0, false
+		}
+		if end >= size {
+			end = size - 1
+		}
+	}
+	return start, end - start + 1, true
+}
+
+func matchesIfMatch(value, etag string) bool {
+	if value == "" {
+		return true
+	}
+	for _, candidate := range strings.Split(value, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || (etag != "" && !strings.HasPrefix(candidate, "W/") && candidate == etag) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesIfNoneMatch(value, etag string) bool {
+	for _, candidate := range strings.Split(value, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || (etag != "" && strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(etag, "W/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func notModifiedSince(value string, modified time.Time) bool {
+	date, err := http.ParseTime(value)
+	return value != "" && err == nil && !modified.IsZero() && !modified.Truncate(time.Second).After(date)
+}
+
+func ifRangeMatches(value, etag string, modified time.Time) bool {
+	if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "W/") {
+		return etag != "" && !strings.HasPrefix(value, "W/") && value == etag
+	}
+	date, err := http.ParseTime(value)
+	return err == nil && !modified.IsZero() && !modified.Truncate(time.Second).After(date)
+}
+
 func storageError(w http.ResponseWriter, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
 		fail(w, 404, "object_not_found", "Object does not exist")
@@ -380,6 +518,12 @@ func storageError(w http.ResponseWriter, err error) {
 		fail(w, 400, "invalid_key", "Invalid object key")
 	} else {
 		fail(w, 500, "storage_error", "Storage operation failed")
+	}
+}
+
+func clearObjectHeaders(w http.ResponseWriter) {
+	for _, name := range []string{"Content-Type", "Content-Length", "Content-Range", "Last-Modified", "ETag"} {
+		w.Header().Del(name)
 	}
 }
 func (s *Server) current(app string) (string, error) {

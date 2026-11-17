@@ -85,6 +85,8 @@ To select an existing S3-compatible bucket, set `PMQ_STORAGE_PROVIDER=s3`, `PMQ_
 
 Each validated app hostname maps to its own `apps/<app>/` prefix. Object keys are limited to 160 bytes and stored as encoded flat names; empty or traversal segments and backslashes are rejected. This is soft separation, not protection against someone with bucket or filesystem access. Keep the local data directory writable only by PMQ and trusted administrators: the filesystem provider is intended for local disks, not shared or distributed filesystems. Upstream describes its filesystem provider as experimental; it is not designed for distributed workloads.
 
+Storage uploads and downloads stream through bounded readers and writers; uploads are capped at 32 MiB. GET supports one byte range and conditional headers, while HEAD returns full object metadata. Filesystem uploads stage to a swap file and rename only after a successful copy. S3-compatible uploads expose the previous completed object until the replacement completes. A canceled/failed upload therefore does not advertise a partial object as complete; unfinished multipart cleanup and durability depend on the configured provider. Bucket operation metrics include range reads and streamed bytes; request cancellations have a separate low-cardinality counter.
+
 Back up the local `objects/` directory with the rest of PMQ data. With S3, objects live outside that directory: configure bucket backups or versioning and test restoring them separately. Changing providers does not migrate existing objects. Keep the bucket and local PMQ data in a coordinated backup and restore plan.
 
 ## Architecture and operations

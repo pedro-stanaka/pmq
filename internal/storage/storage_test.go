@@ -49,8 +49,31 @@ func TestStorageContract(t *testing.T) {
 			if _, err := a.Head(ctx, key); err != nil {
 				t.Fatal(err)
 			}
+			rangeBody, err := a.GetRange(ctx, key, 1, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rangeData, err := io.ReadAll(rangeBody)
+			if closeErr := rangeBody.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if err != nil || string(rangeData) != "ne" {
+				t.Fatalf("range get: %q %v", rangeData, err)
+			}
 			if _, _, err := a.List(ctx, "test/", "", 10); err != nil {
 				t.Fatal(err)
+			}
+			if err := a.Upload(ctx, key, &failingReader{data: []byte("corrupt"), err: errors.New("simulated source failure")}); err == nil {
+				t.Fatal("expected failed overwrite")
+			}
+			preserved, err := a.Get(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preservedData, err := io.ReadAll(preserved)
+			preserved.Close()
+			if err != nil || string(preservedData) != "one" {
+				t.Fatalf("failed overwrite changed existing object: %q %v", preservedData, err)
 			}
 			if _, err := b.Get(ctx, key); !errors.Is(err, storage.ErrNotFound) {
 				t.Fatalf("cross-app read: %v", err)
@@ -97,6 +120,9 @@ func TestStorageContract(t *testing.T) {
 			if err := a.Upload(canceled, key, strings.NewReader("x")); !errors.Is(err, context.Canceled) {
 				t.Errorf("canceled upload: %v", err)
 			}
+			if _, err := a.GetRange(canceled, key, 0, 1); !errors.Is(err, context.Canceled) {
+				t.Errorf("canceled range get: %v", err)
+			}
 		})
 	}
 }
@@ -123,7 +149,7 @@ func assertBucketMetrics(t *testing.T, registry interface {
 			}
 		}
 	}
-	for _, operation := range []string{"upload", "get", "iter", "attributes", "delete"} {
+	for _, operation := range []string{"upload", "get", "get_range", "iter", "attributes", "delete"} {
 		if sampleValue(byName["objstore_bucket_operations_total"], operation) <= 0 {
 			t.Errorf("no %s operation recorded", operation)
 		}
@@ -137,6 +163,23 @@ func assertBucketMetrics(t *testing.T, registry interface {
 	if sampleValue(byName["objstore_bucket_operation_transferred_bytes"], "upload") <= 0 {
 		t.Error("upload bytes were not recorded")
 	}
+	if sampleValue(byName["objstore_bucket_operation_transferred_bytes"], "get_range") <= 0 {
+		t.Error("range bytes were not recorded")
+	}
+}
+
+type failingReader struct {
+	data []byte
+	err  error
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
 }
 
 func sampleValue(family *dto.MetricFamily, operation string) float64 {
