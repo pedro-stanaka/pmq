@@ -543,7 +543,7 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 	if err != nil {
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
-		s.logAIAccounting(app, alias, nil, usageStatus, reservation, cost)
+		s.logAIAccounting(alias, nil, usageStatus, reservation, cost)
 		s.aiFail(w, err, ctx)
 		return
 	}
@@ -551,7 +551,7 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 	if err := json.Unmarshal(response, &completion); err != nil {
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
-		s.logAIAccounting(app, alias, nil, usageStatus, reservation, cost)
+		s.logAIAccounting(alias, nil, usageStatus, reservation, cost)
 		fail(w, 502, "provider_error", "AI provider returned an invalid completion response")
 		return
 	}
@@ -563,7 +563,7 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 	}
 	cost, usageStatus := s.aiAdmission.finish(reservation, usage)
 	s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
-	s.logAIAccounting(app, alias, usage, usageStatus, reservation, cost)
+	s.logAIAccounting(alias, usage, usageStatus, reservation, cost)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write(response)
@@ -604,7 +604,7 @@ func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.
 		usage = nil
 	}
 	cost, usageStatus := s.aiAdmission.finish(reservation, usage)
-	s.logAIAccounting(reservation.app, alias, usage, usageStatus, reservation, cost)
+	s.logAIAccounting(alias, usage, usageStatus, reservation, cost)
 	if err != nil {
 		if !started {
 			s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
@@ -663,15 +663,15 @@ func (s *Server) writeAIStreamUsage(w http.ResponseWriter, reservation *aiReserv
 	_ = http.NewResponseController(w).Flush()
 }
 
-func (s *Server) logAIAccounting(app, alias string, usage *ChatUsage, usageStatus string, reservation *aiReservation, cost float64) {
+func (s *Server) logAIAccounting(alias string, usage *ChatUsage, usageStatus string, reservation *aiReservation, cost float64) {
 	usageFields := ""
 	if usage != nil {
 		usageFields = fmt.Sprintf(" prompt_tokens=%d completion_tokens=%d total_tokens=%d", usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 	}
 	if reservation != nil && reservation.priced {
-		log.Printf("AI request accounting app=%q alias=%q usage_status=%q%s cost_status=estimated estimated_cost_usd=%.8f", app, alias, usageStatus, usageFields, cost)
+		log.Printf("AI request accounting alias=%q usage_status=%q%s cost_status=estimated estimated_cost_usd=%.8f", alias, usageStatus, usageFields, cost)
 	} else {
-		log.Printf("AI request accounting app=%q alias=%q usage_status=%q%s cost_status=unavailable", app, alias, usageStatus, usageFields)
+		log.Printf("AI request accounting alias=%q usage_status=%q%s cost_status=unavailable", alias, usageStatus, usageFields)
 	}
 }
 
