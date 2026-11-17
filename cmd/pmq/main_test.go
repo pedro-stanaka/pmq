@@ -8,12 +8,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,4 +124,49 @@ func mustParseCert(t *testing.T, der []byte) *x509.Certificate {
 		t.Fatal(err)
 	}
 	return cert
+}
+
+func TestVersionCommandOutput(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"version"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.HasPrefix(out, "pmq ") || !strings.Contains(out, "commit") {
+		t.Fatalf("unexpected version output: %q", out)
+	}
+}
+
+func TestHelpCommand(t *testing.T) {
+	for _, arg := range []string{"help", "--help", "-h"} {
+		arg := arg
+		out := captureStdout(t, func() {
+			if err := run([]string{arg}); err != nil {
+				t.Fatalf("%s: %v", arg, err)
+			}
+		})
+		if !strings.Contains(out, "Usage: pmq") || !strings.Contains(out, "deploy") {
+			t.Fatalf("%s: unexpected help output: %q", arg, out)
+		}
+	}
+}
+
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	f()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

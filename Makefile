@@ -1,6 +1,9 @@
 .PHONY: build test lint run check
+# Development builds embed a git-derived version; release builds are stamped
+# by GoReleaser and the image workflow instead.
+PMQ_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 build:
-	go build -o bin/pmq ./cmd/pmq
+	go build -ldflags "-X main.version=$(PMQ_VERSION)" -o bin/pmq ./cmd/pmq
 test:
 	go test ./...
 lint:

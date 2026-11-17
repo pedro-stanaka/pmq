@@ -1,0 +1,14 @@
+pkgbase = pmq
+	pkgdesc = Poor Man's Quick: self-hosted static app hosting with per-app JSON documents, object storage and an OpenAI-compatible AI gateway
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/pedro-stanaka/pmq
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = go
+	options = !debug
+	source = pmq-0.1.0.tar.gz::https://github.com/pedro-stanaka/pmq/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = pmq

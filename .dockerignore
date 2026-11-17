@@ -1,6 +1,15 @@
+# Keep build contexts and released images free of local state and secrets.
 .git
-.env
-data
-bin
-
+.github
 .local
+bin
+data
+dist
+node_modules
+sdk/dist
+examples/vite/dist
+skills/pmq-app-builder/assets/templates/react-vite-ts/dist
+.env
+*.pem
+*.key
+*.db

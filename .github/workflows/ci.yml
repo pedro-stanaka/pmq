@@ -29,3 +29,35 @@ jobs:
       - run: npm ci --prefix skills/pmq-app-builder/assets/templates/react-vite-ts
       - run: npm run build --prefix skills/pmq-app-builder/assets/templates/react-vite-ts
       - run: scripts/smoke-test.sh
+
+  # Validate the release pipeline on every PR without publishing anything:
+  # configuration check plus a snapshot build of the full platform matrix.
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install GoReleaser (pinned)
+        run: |
+          curl -fsSL https://github.com/goreleaser/goreleaser/releases/download/v2.20.2/goreleaser_Linux_x86_64.tar.gz | tar -xz goreleaser
+          sudo install -m 0755 goreleaser /usr/local/bin/goreleaser
+      - run: goreleaser check
+      - name: Snapshot build (full platform matrix)
+        run: goreleaser build --snapshot --clean
+      - name: Run the built linux/amd64 binary
+        run: |
+          ./dist/pmq_linux_amd64_v1/pmq version
+          ./dist/pmq_linux_amd64_v1/pmq help
+
+  # Build and install the Arch source package from a checksum-verified
+  # snapshot of this commit, inside an Arch Linux container.
+  arch-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/test-arch-package.sh
