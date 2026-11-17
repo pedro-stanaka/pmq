@@ -1,0 +1,206 @@
+<!doctype html>
+<!-- PMQ deploy console, embedded in the server binary and served at the
+     bare PMQ domain root and under /_pmq/admin/. One file, no external
+     assets, no build step. The deploy token is entered at runtime and
+     held only in memory: it is never persisted or sent anywhere except
+     the same-origin admin API. -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:">
+<title>PMQ — build it, drop it, run it.</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #f6f6f7; color: #1f2328; padding: 48px 16px;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #0d1117; color: #e6edf3; } }
+  header { text-align: center; margin-bottom: 28px; }
+  .logo { display: inline-flex; align-items: center; gap: 10px; font-size: 28px; font-weight: 700; }
+  .logo svg { width: 34px; height: 34px; }
+  .tagline { color: #656d76; margin: 8px 0 0; }
+  @media (prefers-color-scheme: dark) { .tagline { color: #8b949e; } }
+  main { width: 100%; max-width: 520px; }
+  .card {
+    background: #fff; border: 1px solid #d0d7de; border-radius: 12px; padding: 20px;
+    box-shadow: 0 1px 3px rgba(31,35,40,.07);
+  }
+  @media (prefers-color-scheme: dark) { .card { background: #161b22; border-color: #30363d; } }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 4px; }
+  input {
+    width: 100%; padding: 8px 10px; border-radius: 8px; font-size: 15px;
+    border: 1px solid #d0d7de; background: #fff; color: inherit;
+  }
+  @media (prefers-color-scheme: dark) { input { background: #0d1117; border-color: #30363d; } }
+  #drop {
+    margin-top: 16px; border: 2px dashed #d0d7de; border-radius: 12px; padding: 26px 10px;
+    text-align: center; cursor: pointer; user-select: none; color: #656d76; font-size: 15px;
+  }
+  #drop.over { border-color: #3e63dd; color: #3e63dd; }
+  #drop.hasfile { border-style: solid; color: inherit; }
+  @media (prefers-color-scheme: dark) { #drop { border-color: #30363d; color: #8b949e; } }
+  button {
+    margin-top: 18px; width: 100%; padding: 10px; font-size: 16px; font-weight: 600;
+    color: #fff; background: #1f6feb; border: 0; border-radius: 8px; cursor: pointer;
+  }
+  button:hover { background: #388bfd; }
+  button:disabled { opacity: .55; cursor: default; }
+  .bar { margin-top: 14px; height: 8px; border-radius: 4px; background: #d0d7de; overflow: hidden; display: none; }
+  .bar > div { height: 100%; width: 0; background: #1f6feb; transition: width .2s; }
+  @media (prefers-color-scheme: dark) { .bar { background: #21262d; } }
+  .status { margin-top: 12px; font-size: 14px; white-space: pre-wrap; }
+  .status.error { color: #cf222e; }
+  .result { margin-top: 12px; font-size: 15px; display: none; }
+  .result a { color: #1f6feb; }
+  ul.apps { margin: 10px 0 0; padding-left: 20px; font-size: 14px; }
+  .note { margin-top: 16px; font-size: 12.5px; color: #656d76; }
+  @media (prefers-color-scheme: dark) { .note { color: #8b949e; } }
+</style>
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#3e63dd"/><path d="M8 10h16v4h-6v10h-4V14H8z" fill="#fff"/></svg>
+    PMQ
+  </div>
+  <p class="tagline">Build it. Drop it. Run it.</p>
+</header>
+<main>
+  <div class="card">
+    <label for="name">App name</label>
+    <input id="name" placeholder="hello-world" autocomplete="off" spellcheck="false" pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength="63">
+    <label for="token">Deploy token</label>
+    <input id="token" type="password" placeholder="Deployment bearer token" autocomplete="off">
+    <div id="drop" tabindex="0" role="button" aria-label="Choose or drop a zip file">
+      Drop a <strong>.zip</strong> here, or click to choose
+      <div id="filename"></div>
+    </div>
+    <input id="file" type="file" accept=".zip,application/zip" hidden>
+    <div class="bar"><div id="progress"></div></div>
+    <div class="status" id="status"></div>
+    <div class="result" id="result"></div>
+    <ul class="apps" id="apps" hidden></ul>
+    <button id="deploy" disabled>Deploy</button>
+    <p class="note">
+      The zip must contain a root <code>index.html</code>. Deploying an existing
+      name replaces its entire file set; documents and objects are preserved.
+      The token is kept only in this page and sent solely to this PMQ instance.
+    </p>
+  </div>
+</main>
+<script>
+(function () {
+  var drop = document.getElementById('drop');
+  var fileInput = document.getElementById('file');
+  var nameInput = document.getElementById('name');
+  var tokenInput = document.getElementById('token');
+  var deployButton = document.getElementById('deploy');
+  var status = document.getElementById('status');
+  var result = document.getElementById('result');
+  var apps = document.getElementById('apps');
+  var bar = document.querySelector('.bar');
+  var progress = document.getElementById('progress');
+  var filename = document.getElementById('filename');
+  var file = null;
+
+  function ready() {
+    var n = nameInput.value;
+    var okName = /^[a-z0-9]+(-[a-z0-9]+)*$/.test(n) && n.length <= 63 &&
+      !/^(admin|api|www|pmq)$/.test(n);
+    deployButton.disabled = !(okName && file && tokenInput.value);
+  }
+  nameInput.addEventListener('input', ready);
+  tokenInput.addEventListener('input', ready);
+
+  function setFile(f) {
+    if (!f) return;
+    if (!/\.zip$/i.test(f.name) && f.type !== 'application/zip') {
+      message('Only .zip archives are accepted.', true);
+      return;
+    }
+    file = f;
+    filename.textContent = f.name + ' (' + (f.size / 1048576).toFixed(1) + ' MiB)';
+    drop.classList.add('hasfile');
+    ready();
+  }
+  drop.addEventListener('click', function () { fileInput.click(); });
+  drop.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  });
+  fileInput.addEventListener('change', function () { setFile(this.files[0]); });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) {
+      e.preventDefault(); drop.classList.add('over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+  });
+  drop.addEventListener('drop', function (e) { setFile(e.dataTransfer.files[0]); });
+
+  function message(text, isError) {
+    status.textContent = text;
+    status.className = 'status' + (isError ? ' error' : '');
+  }
+
+  deployButton.addEventListener('click', function () {
+    var name = encodeURIComponent(nameInput.value.trim());
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/_pmq/admin/deploy/' + name);
+    xhr.setRequestHeader('Authorization', 'Bearer ' + tokenInput.value);
+    xhr.setRequestHeader('Content-Type', 'application/zip');
+    xhr.upload.onprogress = function (e) {
+      if (e.lengthComputable) {
+        bar.style.display = 'block';
+        progress.style.width = Math.round(e.loaded / e.total * 100) + '%';
+      }
+    };
+    xhr.onload = function () {
+      if (xhr.status === 201) {
+        bar.style.display = 'none';
+        result.style.display = 'block';
+        var host = location.hostname + (location.port ? ':' + location.port : '');
+        var scheme = location.protocol !== 'http:' ? 'https' : 'http';
+        result.innerHTML = '<strong>' + nameInput.value + '</strong> is live at ' +
+          '<a target="_blank" rel="noopener" href="' + scheme + '://' +
+          nameInput.value + '.' + host + '/">' + nameInput.value + '.' + host + '</a>';
+        message('Deployed.');
+        listApps();
+      } else {
+        var detail = '';
+        try {
+          detail = JSON.parse(xhr.responseText).error.message;
+        } catch (e) {}
+        message('Deploy failed (' + xhr.status + '): ' + (detail || xhr.statusText), true);
+      }
+    };
+    xhr.onerror = function () {
+      message('Network error — is this host allowed to reach the admin API behind your proxy?', true);
+    };
+    message('Uploading\u2026');
+    result.style.display = 'none';
+    xhr.send(file);
+  });
+
+  function listApps() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/_pmq/admin/apps');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + tokenInput.value);
+    xhr.onload = function () {
+      if (xhr.status !== 200) { return; }
+      var list = [];
+      try { list = JSON.parse(xhr.responseText).apps || []; } catch (e) { return; }
+      apps.hidden = false;
+      apps.innerHTML = '';
+      list.forEach(function (a) {
+        var li = document.createElement('li');
+        li.textContent = a;
+        apps.appendChild(li);
+      });
+    };
+    xhr.send();
+  }
+})();
+</script>
+</html>

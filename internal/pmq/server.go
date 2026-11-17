@@ -2,11 +2,14 @@ package pmq
 
 import (
 	"archive/tar"
+	"archive/zip"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -45,14 +48,23 @@ var idRE = regexp.MustCompile(`^[a-f0-9]{32}$`)
 func ValidName(s string) bool {
 	return storage.ValidApp(s)
 }
-func HostApp(host, domain string) (string, error) {
-	if strings.Contains(host, ":") {
-		var err error
-		host, _, err = net.SplitHostPort(host)
-		if err != nil {
-			return "", errors.New("invalid host")
-		}
+
+// hostName strips an optional port from a Host header value. Malformed
+// host:port values are left intact so downstream suffix matching rejects
+// them, preserving HostApp's previous behavior.
+func hostName(host string) string {
+	if !strings.Contains(host, ":") {
+		return host
 	}
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
+	}
+	return h
+}
+
+func HostApp(host, domain string) (string, error) {
+	host = hostName(host)
 	host = strings.ToLower(host)
 	domain = strings.ToLower(domain)
 	suffix := "." + domain
@@ -305,6 +317,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/_pmq/admin/") {
+		if r.URL.Path == "/_pmq/admin/" && r.Method == http.MethodGet {
+			// Operator-origin console: same page as the bare-domain landing,
+			// reachable where the reverse proxy exposes admin routes.
+			s.admin(w, r)
+			return
+		}
 		if r.URL.Path == "/_pmq/admin/metrics" {
 			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Token)) != 1 {
@@ -323,6 +341,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	app, err := HostApp(r.Host, s.cfg.Domain)
 	if err != nil {
+		// The bare PMQ domain is the console landing: drop a zip, get a URL.
+		// App hostnames keep 404 semantics; only the exact domain matches.
+		if r.Method == http.MethodGet && r.URL.Path == "/" && strings.EqualFold(hostName(r.Host), s.cfg.Domain) {
+			s.console(w)
+			return
+		}
 		fail(w, 404, "not_found", "Application not found")
 		return
 	}
@@ -497,6 +521,22 @@ func storageOutcome(status int, ctxErr error) string {
 }
 
 const MaxObject = 32 << 20
+
+// The deploy console is embedded in the binary: one self-contained HTML
+// page, no external assets, no hosting service. It asks for the deploy token
+// at runtime and only ever sends it to this same instance's admin API.
+//
+//go:embed console.html
+var consoleHTML []byte
+
+func (s *Server) console(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := io.WriteString(w, string(consoleHTML)); err != nil {
+		log.Printf("console write error: %v", err)
+	}
+}
 
 func (s *Server) objects(w http.ResponseWriter, r *http.Request, app string) {
 	store, err := s.storage.ForApp(app)
@@ -903,6 +943,10 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const prefix = "/_pmq/admin/deploy/"
+	if r.URL.Path == "/_pmq/admin/" && r.Method == http.MethodGet {
+		s.console(w)
+		return
+	}
 	if !strings.HasPrefix(r.URL.Path, prefix) || r.Method != http.MethodPost {
 		fail(w, 404, "not_found", "Endpoint not found")
 		return
@@ -1057,6 +1101,9 @@ func (s *Server) prune(app string, keep int) ([]string, error) {
 	}
 	return removed, nil
 }
+
+// deploy stages a new release from a gzip-compressed tar archive or a zip
+// archive (detected by magic bytes), then atomically activates it.
 func (s *Server) deploy(name string, body io.Reader) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1070,65 +1117,22 @@ func (s *Server) deploy(name string, body io.Reader) error {
 		return err
 	}
 	defer os.RemoveAll(stage)
-	gz, err := gzip.NewReader(body)
+	// Peek the first bytes so a single request body can be dispatched to the
+	// matching extractor without trusting a Content-Type header.
+	br := bufio.NewReader(body)
+	head, err := br.Peek(2)
 	if err != nil {
 		return err
 	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	total := int64(0)
-	count := 0
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		count++
-		if count > 10000 {
-			return errors.New("too many entries")
-		}
-		n := h.Name
-		if n == "" || strings.Contains(n, "\\") || strings.HasPrefix(n, "/") || path.Clean(n) != n || n == "." || strings.HasPrefix(n, "../") || strings.Contains(n, "/../") {
-			return errors.New("unsafe path")
-		}
-		target := filepath.Join(stage, filepath.FromSlash(n))
-		switch h.Typeflag {
-		case tar.TypeDir:
-			if err = os.MkdirAll(target, 0700); err != nil {
-				return err
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			total += h.Size
-			if h.Size < 0 || total > MaxUpload {
-				return errors.New("too large")
-			}
-			if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
-				return err
-			}
-			f, e := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-			if e != nil {
-				return e
-			}
-			_, e = io.Copy(f, tr)
-			ce := f.Close()
-			if e != nil {
-				return e
-			}
-			if ce != nil {
-				return ce
-			}
-		default:
-			return errors.New("unsupported entry")
-		}
+	switch {
+	case head[0] == 0x1f && head[1] == 0x8b:
+		err = extractTarGz(stage, br)
+	case head[0] == 'P' && head[1] == 'K':
+		err = extractZip(stage, br)
+	default:
+		return errors.New("unsupported archive format")
 	}
-	// Consume gzip trailer and remaining input so truncation and compressed-size limits are enforced.
-	if _, err = io.Copy(io.Discard, gz); err != nil {
-		return err
-	}
-	if _, err = io.Copy(io.Discard, body); err != nil {
+	if err != nil {
 		return err
 	}
 	st, err := os.Stat(filepath.Join(stage, "index.html"))
@@ -1162,6 +1166,168 @@ func (s *Server) deploy(name string, body io.Reader) error {
 		return ce
 	}
 	return os.Rename(tmp, filepath.Join(base, "current"))
+}
+
+// validEntryName rejects empty, absolute, and traversal-shaped archive paths.
+func validEntryName(n string) bool {
+	return n != "" && !strings.Contains(n, "\\") && !strings.HasPrefix(n, "/") &&
+		path.Clean(n) == n && n != "." && !strings.HasPrefix(n, "../") && !strings.Contains(n, "/../")
+}
+
+func extractTarGz(stage string, body io.Reader) error {
+	gz, err := gzip.NewReader(body)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	total := int64(0)
+	count := 0
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		count++
+		if count > 10000 {
+			return errors.New("too many entries")
+		}
+		n := h.Name
+		if !validEntryName(n) {
+			return errors.New("unsafe path")
+		}
+		target := filepath.Join(stage, filepath.FromSlash(n))
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err = os.MkdirAll(target, 0700); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			total += h.Size
+			if h.Size < 0 || total > MaxUpload {
+				return errors.New("too large")
+			}
+			if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+				return err
+			}
+			if err = writeFileFrom(target, tr, h.Size); err != nil {
+				return err
+			}
+		default:
+			return errors.New("unsupported entry")
+		}
+	}
+	// Consume gzip trailer and remaining input so truncation and compressed-size limits are enforced.
+	if _, err = io.Copy(io.Discard, gz); err != nil {
+		return err
+	}
+	_, err = io.Copy(io.Discard, body)
+	return err
+}
+
+func writeFileFrom(target string, src io.Reader, size int64) error {
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	// Enforce the declared size even if the stream lies: reading a byte past it
+	// rejects the entry, and reading fewer fails the final length check.
+	n, e := io.Copy(f, io.LimitReader(src, size+1))
+	if e == nil && n != size {
+		e = errors.New("truncated entry")
+	}
+	ce := f.Close()
+	if e != nil {
+		return e
+	}
+	return ce
+}
+
+// extractZip spools the (already size-capped) upload to a temp file because
+// archive/zip requires an io.ReaderAt, then unpacks with the same validation
+// rules as the tar path: regular files only, bounded sizes and entry counts,
+// no traversal, no duplicates, no archives that lie about entry sizes.
+func extractZip(stage string, body io.Reader) error {
+	spool, err := os.CreateTemp("", "pmq-zip-*")
+	if err != nil {
+		return err
+	}
+	name := spool.Name()
+	defer os.Remove(name)
+	size, err := io.Copy(spool, body)
+	ce := spool.Close()
+	if err != nil {
+		return err
+	}
+	if ce != nil {
+		return ce
+	}
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	zr, err := zip.NewReader(f, size)
+	if err != nil {
+		return err
+	}
+	total := int64(0)
+	if len(zr.File) > 10000 {
+		return errors.New("too many entries")
+	}
+	for _, entry := range zr.File {
+		n := entry.Name
+		isDir := entry.FileInfo().IsDir()
+		if isDir {
+			// Zip convention gives directory entries a trailing slash; tar does
+			// not. Accept it rather than rejecting every archive from common
+			// zip tools.
+			n = strings.TrimSuffix(n, "/")
+		}
+		if n == "" || n == "." {
+			if isDir {
+				continue
+			}
+			return errors.New("unsafe path")
+		}
+		if !validEntryName(n) {
+			return errors.New("unsafe path")
+		}
+		target := filepath.Join(stage, filepath.FromSlash(n))
+		if isDir {
+			if err = os.MkdirAll(target, 0700); err != nil {
+				return err
+			}
+			continue
+		}
+		if !entry.FileInfo().Mode().IsRegular() {
+			return errors.New("unsupported entry")
+		}
+		declared := int64(entry.UncompressedSize64)
+		total += declared
+		if declared < 0 || total > MaxUpload {
+			return errors.New("too large")
+		}
+		if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+			return err
+		}
+		rc, e := entry.Open()
+		if e != nil {
+			return e
+		}
+		e = writeFileFrom(target, rc, declared)
+		re := rc.Close()
+		if e != nil {
+			return e
+		}
+		if re != nil {
+			return re
+		}
+	}
+	return nil
 }
 func (s *Server) db(app string) (*sql.DB, error) {
 	s.mu.Lock()
