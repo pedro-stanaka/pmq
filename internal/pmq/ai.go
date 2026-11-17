@@ -295,7 +295,11 @@ func (p *sdkAIProvider) Complete(ctx context.Context, body json.RawMessage) (jso
 		return nil, err
 	}
 	var response json.RawMessage
-	if err := client.Execute(ctx, http.MethodPost, "/chat/completions", bytes.NewReader(encoded), &response); err != nil {
+	// bytes.NewBuffer, not bytes.NewReader: the SDK's retry GetBody seeks a
+	// *bytes.Reader in place, racing the transport's write loop when a
+	// provider answers before the request body is fully written. A buffer's
+	// GetBody returns a fresh reader over the same immutable bytes.
+	if err := client.Execute(ctx, http.MethodPost, "/chat/completions", bytes.NewBuffer(encoded), &response); err != nil {
 		return nil, err
 	}
 	var upstream ChatResponse
@@ -337,7 +341,8 @@ func (p *sdkAIProvider) Stream(ctx context.Context, body json.RawMessage, emit f
 		return nil, err
 	}
 	var upstream *http.Response
-	if err := client.Execute(ctx, http.MethodPost, "/chat/completions", bytes.NewReader(encoded), &upstream); err != nil {
+	// Same retry-safe body rationale as Complete: a buffer, not a reader.
+	if err := client.Execute(ctx, http.MethodPost, "/chat/completions", bytes.NewBuffer(encoded), &upstream); err != nil {
 		return nil, err
 	}
 	if upstream == nil || upstream.Body == nil {
