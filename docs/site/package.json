@@ -1,0 +1,13 @@
+{
+  "name": "pmq-docs-site",
+  "private": true,
+  "description": "PMQ documentation website (VitePress), published to GitHub Pages.",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}

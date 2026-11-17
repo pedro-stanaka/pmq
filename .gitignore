@@ -2,6 +2,9 @@
 /data/
 .env
 
+/docs/site/.vitepress/dist/
+/docs/site/.vitepress/cache/
+
 /.local/
 /node_modules/
 /sdk/dist/
