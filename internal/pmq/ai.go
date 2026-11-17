@@ -581,6 +581,7 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 		s.recordAIResult(provider, metricAlias, startedAt, err, ctx)
 		span.SetStatus(codes.Error, boundedAIError(err, ctx))
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
+		s.recordAIEstimatedCost(provider, metricAlias, reservation, nil, cost)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 		s.logAIAccounting(alias, nil, usageStatus, reservation, cost)
 		s.aiFail(w, err, ctx)
@@ -591,6 +592,7 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 		s.recordAIResult(provider, metricAlias, startedAt, err, ctx)
 		span.SetStatus(codes.Error, "provider")
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
+		s.recordAIEstimatedCost(provider, metricAlias, reservation, nil, cost)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 		s.logAIAccounting(alias, nil, usageStatus, reservation, cost)
 		fail(w, 502, "provider_error", "AI provider returned an invalid completion response")
@@ -609,6 +611,7 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 		s.aiMetrics.usageMissing.WithLabelValues(provider, metricAlias).Inc()
 	}
 	cost, usageStatus := s.aiAdmission.finish(reservation, usage)
+	s.recordAIEstimatedCost(provider, metricAlias, reservation, usage, cost)
 	s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 	s.logAIAccounting(alias, usage, usageStatus, reservation, cost)
 	w.Header().Set("Content-Type", "application/json")
@@ -620,6 +623,7 @@ func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.
 	streamer, ok := s.aiProvider.(StreamingChatProvider)
 	if !ok {
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
+		s.recordAIEstimatedCost(provider, metricAlias, reservation, nil, cost)
 		s.recordAIResult(provider, metricAlias, startedAt, errors.New("streaming unsupported"), ctx)
 		s.setAIAccountingHeaders(w, reservation, cost, usageStatus)
 		fail(w, 501, "streaming_unsupported", "Configured provider does not support streaming")
@@ -666,6 +670,7 @@ func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.
 		s.aiMetrics.usageMissing.WithLabelValues(provider, metricAlias).Inc()
 	}
 	cost, usageStatus := s.aiAdmission.finish(reservation, usage)
+	s.recordAIEstimatedCost(provider, metricAlias, reservation, usage, cost)
 	s.logAIAccounting(alias, usage, usageStatus, reservation, cost)
 	if err != nil {
 		if !started {

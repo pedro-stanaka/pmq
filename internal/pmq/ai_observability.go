@@ -23,6 +23,7 @@ type aiMetrics struct {
 	active                                *prometheus.GaugeVec
 	duration, ttft                        *prometheus.HistogramVec
 	tokens                                *prometheus.CounterVec
+	estimatedCost                         *prometheus.CounterVec
 }
 
 func newAIMetrics(r *prometheus.Registry) *aiMetrics {
@@ -32,10 +33,11 @@ func newAIMetrics(r *prometheus.Registry) *aiMetrics {
 		duration:      prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pmq_ai_request_duration_seconds", Help: "AI provider request duration in seconds.", Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60}}, []string{"provider", "model_alias", "outcome"}),
 		ttft:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pmq_ai_time_to_first_token_seconds", Help: "AI stream time to first token in seconds.", Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}}, []string{"provider", "model_alias"}),
 		tokens:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_ai_tokens_total", Help: "AI tokens reported by provider usage metadata."}, []string{"provider", "model_alias", "direction"}),
+		estimatedCost: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_ai_estimated_cost_usd_total", Help: "Operator-price-based estimated AI cost in USD; not billing data."}, []string{"provider", "model_alias", "basis"}),
 		usageMissing:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_ai_usage_missing_total", Help: "AI successful requests without complete token usage."}, []string{"provider", "model_alias"}),
 		limitRejected: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_ai_limit_rejections_total", Help: "AI requests rejected by configured limits."}, []string{"reason"}),
 	}
-	r.MustRegister(m.requests, m.active, m.duration, m.ttft, m.tokens, m.usageMissing, m.limitRejected)
+	r.MustRegister(m.requests, m.active, m.duration, m.ttft, m.tokens, m.estimatedCost, m.usageMissing, m.limitRejected)
 	return m
 }
 
@@ -115,6 +117,17 @@ func (s *Server) recordAIUsage(provider, alias string, usage *ChatUsage) {
 	}
 	s.aiMetrics.tokens.WithLabelValues(provider, alias, "input").Add(float64(usage.PromptTokens))
 	s.aiMetrics.tokens.WithLabelValues(provider, alias, "output").Add(float64(usage.CompletionTokens))
+}
+
+func (s *Server) recordAIEstimatedCost(provider, alias string, reservation *aiReservation, usage *ChatUsage, cost float64) {
+	if reservation == nil || !reservation.priced {
+		return
+	}
+	basis := "estimated_request"
+	if validChatUsage(usage) {
+		basis = "reported_tokens"
+	}
+	s.aiMetrics.estimatedCost.WithLabelValues(provider, alias, basis).Add(cost)
 }
 
 func newAITracer(endpoint string) (*sdktrace.TracerProvider, error) {

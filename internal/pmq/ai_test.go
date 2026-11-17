@@ -236,27 +236,31 @@ func (p usageStreamProvider) Stream(_ context.Context, _ json.RawMessage, emit f
 }
 
 func TestAIStreamMetricsUseFinalUsageAndFirstContent(t *testing.T) {
-	cfg := AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: "openai", ModelID: "private-model"}}}
-	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: usageStreamProvider{chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(chatResponse), nil
-	})}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	upload(t, s, "app", "app")
-	w := req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"stream":true,"messages":[{"role":"user","content":"hidden"}]}`), true)
-	if w.Code != 200 {
-		t.Fatal(w.Code, w.Body)
-	}
-	metrics := scrapeMetrics(t, s)
-	for _, want := range []string{`pmq_ai_tokens_total{direction="input",model_alias="alias",provider="openai"} 5`, `pmq_ai_tokens_total{direction="output",model_alias="alias",provider="openai"} 2`, `pmq_ai_time_to_first_token_seconds_count{model_alias="alias",provider="openai"} 1`} {
-		if !strings.Contains(metrics, want) {
-			t.Errorf("missing stream metric %q from:\n%s", want, metrics)
-		}
-	}
-	if strings.Contains(metrics, `pmq_ai_usage_missing_total{provider="openai",model_alias="alias"} 1`) {
-		t.Fatal("complete stream usage was marked missing")
+	for _, provider := range []string{"openai", "openrouter", "bedrock"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: provider, ModelID: "private-model", Streaming: provider == "bedrock"}}}
+			s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: usageStreamProvider{chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+				return json.RawMessage(chatResponse), nil
+			})}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			upload(t, s, "app", "app")
+			w := req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"stream":true,"messages":[{"role":"user","content":"hidden"}]}`), true)
+			if w.Code != 200 {
+				t.Fatal(w.Code, w.Body)
+			}
+			metrics := scrapeMetrics(t, s)
+			for _, want := range []string{`pmq_ai_tokens_total{direction="input",model_alias="alias",provider="` + provider + `"} 5`, `pmq_ai_tokens_total{direction="output",model_alias="alias",provider="` + provider + `"} 2`, `pmq_ai_time_to_first_token_seconds_count{model_alias="alias",provider="` + provider + `"} 1`} {
+				if !strings.Contains(metrics, want) {
+					t.Errorf("missing stream metric %q", want)
+				}
+			}
+			if strings.Contains(metrics, `pmq_ai_usage_missing_total{provider="`+provider+`",model_alias="alias"} 1`) {
+				t.Fatal("complete stream usage was marked missing")
+			}
+		})
 	}
 }
 
@@ -292,6 +296,40 @@ func TestAILimitRejectionMetricUsesBoundedReason(t *testing.T) {
 	}
 	if strings.Contains(metrics, "private-model") || strings.Contains(metrics, "app.apps.localhost") {
 		t.Fatal("private values leaked in metric labels")
+	}
+}
+
+func TestAIEstimatedCostMetricUsesBoundedBasisAndKeepsProvenanceSeparate(t *testing.T) {
+	calls := 0
+	provider := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		calls++
+		if calls == 1 {
+			return json.RawMessage(`{"object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`), nil
+		}
+		return json.RawMessage(chatResponse), nil
+	})
+	cfg := AIConfig{DefaultModel: "priced", Models: map[string]ModelBinding{"priced": {Provider: "openai", ModelID: "private-model"}}, Limits: AILimits{Pricing: map[string]AIPrice{"priced": {InputUSDPerMillion: 2, OutputUSDPerMillion: 4, Provenance: "private-price-source"}}}}
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	upload(t, s, "app", "app")
+	one := req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"one"}]}`), true)
+	if got := one.Header().Get("X-PMQ-Pricing-Provenance"); got != "private-price-source" {
+		t.Fatalf("pricing provenance response header %q", got)
+	}
+	if got := req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"two"}]}`), true); got.Code != 200 {
+		t.Fatal(got.Code, got.Body)
+	}
+	metrics := scrapeMetrics(t, s)
+	for _, want := range []string{`pmq_ai_estimated_cost_usd_total{basis="reported_tokens",model_alias="priced",provider="openai"}`, `pmq_ai_estimated_cost_usd_total{basis="estimated_request",model_alias="priced",provider="openai"}`} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("cost series missing %q", want)
+		}
+	}
+	if strings.Contains(metrics, "private-price-source") || strings.Contains(metrics, "private-model") {
+		t.Fatal("private pricing or model value leaked to metric labels")
 	}
 }
 
@@ -801,7 +839,7 @@ func TestAIPerAppRateLimit(t *testing.T) {
 }
 
 func TestStreamingClientDisconnectCancelsUpstream(t *testing.T) {
-	upstreamCanceled := make(chan struct{})
+	upstreamCanceled := make(chan struct{}, 3)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"id\":\"chunk\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":null}]}\n\n")
@@ -809,39 +847,54 @@ func TestStreamingClientDisconnectCancelsUpstream(t *testing.T) {
 			f.Flush()
 		}
 		<-r.Context().Done()
-		close(upstreamCanceled)
+		upstreamCanceled <- struct{}{}
 	}))
 	defer ts.Close()
-	p, err := newAIProvider(AIConfig{OpenAIKey: "test-key", OpenAIBaseURL: ts.URL + "/v1", DefaultModel: "fast", Models: map[string]ModelBinding{"fast": {Provider: "openai", ModelID: "model"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := aiFixture(t, p)
-	appServer := httptest.NewServer(s)
-	defer appServer.Close()
-	r, err := http.NewRequest(http.MethodPost, appServer.URL+"/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.Host = "chat.apps.localhost"
-	r.Header.Set("Origin", "http://chat.apps.localhost")
-	resp, err := appServer.Client().Do(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	line, err := bufio.NewReader(resp.Body).ReadString('\n')
-	if err != nil || !strings.Contains(line, `"content":"first"`) {
-		t.Fatalf("first token not delivered: %q %v", line, err)
-	}
-	_ = resp.Body.Close()
-	select {
-	case <-upstreamCanceled:
-	case <-time.After(3 * time.Second):
-		t.Fatal("client disconnect did not cancel upstream stream")
-	}
-	metrics := scrapeMetrics(t, s)
-	if !strings.Contains(metrics, `error="canceled"`) {
-		t.Fatalf("stream cancellation metric missing: %s", metrics)
+	for _, provider := range []string{"openai", "openrouter", "bedrock"} {
+		t.Run(provider, func(t *testing.T) {
+			if provider == "bedrock" {
+				t.Setenv("AWS_ACCESS_KEY_ID", "test")
+				t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+			}
+			cfg := AIConfig{DefaultModel: "fast", Models: map[string]ModelBinding{"fast": {Provider: provider, ModelID: "model", Streaming: true}}, OpenAIKey: "test-key", OpenRouterKey: "test-key", AWSRegion: "us-east-1", OpenAIBaseURL: ts.URL + "/v1", OpenRouterBaseURL: ts.URL + "/v1", BedrockBaseURL: ts.URL + "/openai/v1"}
+			p, err := newAIProvider(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			upload(t, s, "chat", "app")
+			appServer := httptest.NewServer(s)
+			defer appServer.Close()
+			r, err := http.NewRequest(http.MethodPost, appServer.URL+"/_pmq/ai/chat/completions", strings.NewReader(`{"model":"fast","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Host = "chat.apps.localhost"
+			r.Header.Set("Origin", "http://chat.apps.localhost")
+			resp, err := appServer.Client().Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			line, err := bufio.NewReader(resp.Body).ReadString('\n')
+			if err != nil || !strings.Contains(line, `"content":"first"`) {
+				t.Fatalf("first token not delivered: %q %v", line, err)
+			}
+			_ = resp.Body.Close()
+			select {
+			case <-upstreamCanceled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("client disconnect did not cancel upstream stream")
+			}
+			metrics := scrapeMetrics(t, s)
+			want := `pmq_ai_requests_total{error="canceled",model_alias="fast",outcome="failure",provider="` + provider + `"} 1`
+			if !strings.Contains(metrics, want) {
+				t.Fatalf("%s cancellation metric missing %q", provider, want)
+			}
+		})
 	}
 }
 
