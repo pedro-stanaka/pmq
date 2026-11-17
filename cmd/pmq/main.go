@@ -41,7 +41,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pmq serve|deploy|list|version")
+		return errors.New("usage: pmq serve|deploy|list|status|releases|rollback|prune|version")
 	}
 	switch args[0] {
 	case "version":
@@ -53,6 +53,14 @@ func run(args []string) error {
 		return deploy(args[1:])
 	case "list":
 		return list(args[1:])
+	case "status":
+		return appCommand(args[1:], "status", "GET", "")
+	case "releases":
+		return appCommand(args[1:], "releases", "GET", "")
+	case "rollback":
+		return rollback(args[1:])
+	case "prune":
+		return prune(args[1:])
 	default:
 		return errors.New("unknown command")
 	}
@@ -307,4 +315,108 @@ func list(args []string) error {
 		fmt.Println(a)
 	}
 	return nil
+}
+func appCommand(args []string, command, method, suffix string) error {
+	f := flag.NewFlagSet(command, flag.ContinueOnError)
+	server, token := clientFlags(f)
+	if len(args) == 0 || !pmq.ValidName(args[0]) {
+		return fmt.Errorf("usage: pmq %s APP", command)
+	}
+	app := args[0]
+	if err := f.Parse(args[1:]); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return fmt.Errorf("usage: pmq %s APP", command)
+	}
+	resp, err := request(method, *server, "/_pmq/admin/"+command+"/"+app+suffix, *token, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err = check(resp); err != nil {
+		return err
+	}
+	var body json.RawMessage
+	if err = json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return err
+	}
+	var out any
+	if err = json.Unmarshal(body, &out); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	return nil
+}
+func rollback(args []string) error {
+	f := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	server, token := clientFlags(f)
+	release := f.String("release", "", "release ID (defaults to previous release)")
+	if len(args) == 0 || !pmq.ValidName(args[0]) {
+		return errors.New("usage: pmq rollback APP [--release ID]")
+	}
+	app := args[0]
+	if err := f.Parse(args[1:]); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return errors.New("usage: pmq rollback APP [--release ID]")
+	}
+	body, _ := json.Marshal(map[string]string{"release": *release})
+	resp, err := request("POST", *server, "/_pmq/admin/rollback/"+app, *token, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err = check(resp); err != nil {
+		return err
+	}
+	var out any
+	if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(out, "", "  ")
+	if err == nil {
+		fmt.Println(string(encoded))
+	}
+	return err
+}
+func prune(args []string) error {
+	f := flag.NewFlagSet("prune", flag.ContinueOnError)
+	server, token := clientFlags(f)
+	keep := f.Int("keep", 5, "number of newest releases to retain (active release is always retained)")
+	if len(args) == 0 || !pmq.ValidName(args[0]) {
+		return errors.New("usage: pmq prune APP --keep N")
+	}
+	app := args[0]
+	if err := f.Parse(args[1:]); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return errors.New("usage: pmq prune APP --keep N")
+	}
+	if *keep < 1 || *keep > 1000 {
+		return errors.New("keep must be between 1 and 1000")
+	}
+	resp, err := request("POST", *server, fmt.Sprintf("/_pmq/admin/prune/%s?keep=%d", app, *keep), *token, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err = check(resp); err != nil {
+		return err
+	}
+	var out any
+	if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(out, "", "  ")
+	if err == nil {
+		fmt.Println(string(encoded))
+	}
+	return err
 }

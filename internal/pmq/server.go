@@ -450,6 +450,84 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{"apps": names})
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/_pmq/admin/status/") && r.Method == http.MethodGet {
+		name := strings.TrimPrefix(r.URL.Path, "/_pmq/admin/status/")
+		if !ValidName(name) {
+			fail(w, 400, "invalid_app", "Invalid application name")
+			return
+		}
+		s.mu.Lock()
+		id, err := s.releaseID(name)
+		s.mu.Unlock()
+		if err != nil {
+			fail(w, 404, "app_not_found", "Application not found")
+			return
+		}
+		reply(w, 200, map[string]string{"name": name, "activeRelease": id})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/_pmq/admin/releases/") && r.Method == http.MethodGet {
+		name := strings.TrimPrefix(r.URL.Path, "/_pmq/admin/releases/")
+		if !ValidName(name) {
+			fail(w, 400, "invalid_app", "Invalid application name")
+			return
+		}
+		s.mu.Lock()
+		releases, active, err := s.listReleases(name)
+		s.mu.Unlock()
+		if err != nil {
+			fail(w, 404, "app_not_found", "Application not found")
+			return
+		}
+		reply(w, 200, map[string]any{"name": name, "activeRelease": active, "releases": releases})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/_pmq/admin/rollback/") && r.Method == http.MethodPost {
+		name := strings.TrimPrefix(r.URL.Path, "/_pmq/admin/rollback/")
+		if !ValidName(name) {
+			fail(w, 400, "invalid_app", "Invalid application name")
+			return
+		}
+		var in struct {
+			Release string `json:"release"`
+		}
+		if r.Body != nil {
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+				fail(w, 400, "invalid_request", "Invalid rollback request")
+				return
+			}
+		}
+		s.mu.Lock()
+		id, err := s.rollback(name, in.Release)
+		s.mu.Unlock()
+		if err != nil {
+			fail(w, 400, "invalid_release", "Could not activate the requested release")
+			return
+		}
+		reply(w, 200, map[string]string{"name": name, "activeRelease": id})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/_pmq/admin/prune/") && r.Method == http.MethodPost {
+		name := strings.TrimPrefix(r.URL.Path, "/_pmq/admin/prune/")
+		if !ValidName(name) {
+			fail(w, 400, "invalid_app", "Invalid application name")
+			return
+		}
+		keep, err := strconv.Atoi(r.URL.Query().Get("keep"))
+		if err != nil || keep < 1 || keep > 1000 {
+			fail(w, 400, "invalid_retention", "keep must be between 1 and 1000")
+			return
+		}
+		s.mu.Lock()
+		removed, err := s.prune(name, keep)
+		s.mu.Unlock()
+		if err != nil {
+			fail(w, 400, "prune_failed", "Could not prune releases")
+			return
+		}
+		reply(w, 200, map[string]any{"name": name, "removed": removed})
+		return
+	}
 	const prefix = "/_pmq/admin/deploy/"
 	if !strings.HasPrefix(r.URL.Path, prefix) || r.Method != http.MethodPost {
 		fail(w, 404, "not_found", "Endpoint not found")
@@ -476,6 +554,134 @@ func randomID() (string, error) {
 	b := make([]byte, 16)
 	_, err := rand.Read(b)
 	return hex.EncodeToString(b), err
+}
+
+type releaseInfo struct {
+	ID        string    `json:"id"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func (s *Server) releaseID(app string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "apps", app, "current"))
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(b))
+	if !idRE.MatchString(id) {
+		return "", errors.New("invalid active release")
+	}
+	st, err := os.Stat(filepath.Join(s.cfg.DataDir, "apps", app, "releases", id))
+	if err != nil || !st.IsDir() {
+		return "", errors.New("missing active release")
+	}
+	return id, nil
+}
+func (s *Server) listReleases(app string) ([]releaseInfo, string, error) {
+	active, err := s.releaseID(app)
+	if err != nil {
+		return nil, "", err
+	}
+	dir := filepath.Join(s.cfg.DataDir, "apps", app, "releases")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]releaseInfo, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() || !idRE.MatchString(e.Name()) {
+			continue
+		}
+		st, err := e.Info()
+		if err != nil {
+			return nil, "", err
+		}
+		out = append(out, releaseInfo{ID: e.Name(), Active: e.Name() == active, CreatedAt: st.ModTime().UTC()})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, active, nil
+}
+func (s *Server) activate(app, id string) error {
+	base := filepath.Join(s.cfg.DataDir, "apps", app)
+	f, err := os.CreateTemp(base, ".current-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err = f.Chmod(0600); err == nil {
+		_, err = f.WriteString(id + "\n")
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	ce := f.Close()
+	if err != nil {
+		return err
+	}
+	if ce != nil {
+		return ce
+	}
+	return os.Rename(tmp, filepath.Join(base, "current"))
+}
+func (s *Server) rollback(app, id string) (string, error) {
+	base := filepath.Join(s.cfg.DataDir, "apps", app)
+	if id == "" {
+		releases, _, err := s.listReleases(app)
+		if err != nil {
+			return "", err
+		}
+		for _, r := range releases {
+			if !r.Active {
+				id = r.ID
+				break
+			}
+		}
+	}
+	if !idRE.MatchString(id) {
+		return "", errors.New("release ID is required and must be valid")
+	}
+	st, err := os.Stat(filepath.Join(base, "releases", id))
+	if err != nil || !st.IsDir() {
+		return "", errors.New("release does not exist")
+	}
+	if err := s.activate(app, id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+func (s *Server) prune(app string, keep int) ([]string, error) {
+	releases, active, err := s.listReleases(app)
+	if err != nil {
+		return nil, err
+	}
+	keepSet := map[string]bool{active: true}
+	// Keep one alternative for rollback even when the active release is newest.
+	for _, release := range releases {
+		if release.ID != active {
+			keepSet[release.ID] = true
+			break
+		}
+	}
+	for i := 0; i < len(releases) && i < keep; i++ {
+		keepSet[releases[i].ID] = true
+	}
+	var removed []string
+	for _, r := range releases {
+		if keepSet[r.ID] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.cfg.DataDir, "apps", app, "releases", r.ID)); err != nil {
+			return removed, err
+		}
+		removed = append(removed, r.ID)
+	}
+	return removed, nil
 }
 func (s *Server) deploy(name string, body io.Reader) error {
 	s.mu.Lock()

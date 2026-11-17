@@ -21,6 +21,9 @@ In another terminal (use the same token):
 ```sh
 ./bin/pmq deploy ./examples/hello-world --name hello-world --server http://127.0.0.1:8080
 ./bin/pmq list --server http://127.0.0.1:8080
+./bin/pmq status hello-world --server http://127.0.0.1:8080
+./bin/pmq releases hello-world --server http://127.0.0.1:8080
+./bin/pmq rollback hello-world --server http://127.0.0.1:8080
 curl -H 'Host: hello-world.apps.localhost' http://127.0.0.1:8080/
 ```
 
@@ -84,6 +87,6 @@ Back up the local `objects/` directory with the rest of PMQ data. With S3, objec
 
 ## Architecture and operations
 
-A validated hostname selects an app; its active immutable release serves files, while a separate SQLite database stores documents. Deployments stage and validate archives then atomically replace a release pointer. See [architecture](docs/architecture.md). Data layout version 1 stores releases under `data/apps/` and databases under `data/state/`. Back up the **entire data directory**, including SQLite WAL files. Stop PMQ for a consistent filesystem backup, or use a SQLite-aware online backup plus a coordinated release snapshot. Test restores. Releases are retained indefinitely; there is no rollback, deletion, or garbage collection command yet.
+A validated hostname selects an app; its active immutable release serves files, while a separate SQLite database stores documents. Deployments stage and validate archives then atomically replace a release pointer. `pmq status APP` and `pmq releases APP` inspect active and retained releases; `pmq rollback APP` activates the previous release, while `pmq rollback APP --release ID` selects a specific release. Releases are retained indefinitely by default. Pruning is explicit: `pmq prune APP --keep 5` keeps the five newest releases, the active release, and the newest other release as a rollback target when one exists. Do not prune a release you may need to roll back to. All management commands use the deployment bearer token. See [architecture](docs/architecture.md). Data layout version 1 stores releases under `data/apps/` and databases under `data/state/`. Back up the **entire data directory**, including SQLite WAL files. Stop PMQ for a consistent filesystem backup, or use a SQLite-aware online backup plus a coordinated release snapshot. Test restores.
 
-This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. The AI route remains reserved and returns 404. Future milestones may add an AI gateway, rollback, and deployment management; OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
+This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. The AI route remains reserved and returns 404. A future milestone may add an AI gateway; OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.

@@ -122,6 +122,145 @@ func TestDeploymentRoutingAndSafety(t *testing.T) {
 		t.Fatal(w.Body)
 	}
 }
+
+func TestReleaseHistoryRollbackAndPrune(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "release-app", "v1")
+	status := req(s, "GET", "localhost", "/_pmq/admin/status/release-app", nil, true)
+	if status.Code != 200 {
+		t.Fatal(status.Code, status.Body)
+	}
+	var first struct {
+		ActiveRelease string `json:"activeRelease"`
+	}
+	if err := json.Unmarshal(status.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	created := req(s, "POST", "release-app.apps.localhost", "/_pmq/db/notes", strings.NewReader(`{"title":"persistent"}`), true)
+	if created.Code != 201 {
+		t.Fatalf("create persistent document: %d %s", created.Code, created.Body)
+	}
+	upload(t, s, "release-app", "v2")
+	active := req(s, "GET", "localhost", "/_pmq/admin/status/release-app", nil, true)
+	var second struct {
+		ActiveRelease string `json:"activeRelease"`
+	}
+	_ = json.Unmarshal(active.Body.Bytes(), &second)
+	if second.ActiveRelease == first.ActiveRelease {
+		t.Fatal("deploy did not create new release")
+	}
+	pruneLatest := req(s, "POST", "localhost", "/_pmq/admin/prune/release-app?keep=1", nil, true)
+	if pruneLatest.Code != 200 {
+		t.Fatalf("prune latest: %d %s", pruneLatest.Code, pruneLatest.Body)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "apps", "release-app", "releases", first.ActiveRelease)); err != nil {
+		t.Fatalf("prune removed rollback target: %v", err)
+	}
+	bad := req(s, "POST", "localhost", "/_pmq/admin/rollback/release-app", strings.NewReader(`{"release":"00000000000000000000000000000000"}`), true)
+	if bad.Code != 400 {
+		t.Fatal(bad.Code, bad.Body)
+	}
+	unchanged := req(s, "GET", "localhost", "/_pmq/admin/status/release-app", nil, true)
+	var still struct {
+		ActiveRelease string `json:"activeRelease"`
+	}
+	_ = json.Unmarshal(unchanged.Body.Bytes(), &still)
+	if still.ActiveRelease != second.ActiveRelease {
+		t.Fatal("invalid rollback changed active release")
+	}
+	rb := req(s, "POST", "localhost", "/_pmq/admin/rollback/release-app", strings.NewReader(`{"release":"`+first.ActiveRelease+`"}`), true)
+	if rb.Code != 200 {
+		t.Fatal(rb.Code, rb.Body)
+	}
+	page := req(s, "GET", "release-app.apps.localhost", "/", nil, true)
+	if page.Code != 200 || page.Body.String() != "v1" {
+		t.Fatalf("rollback response %d %q", page.Code, page.Body.String())
+	}
+	docs := req(s, "GET", "release-app.apps.localhost", "/_pmq/db/notes", nil, true)
+	if docs.Code != 200 || !strings.Contains(docs.Body.String(), `"title":"persistent"`) {
+		t.Fatalf("persistent document changed across rollback: %d %s", docs.Code, docs.Body)
+	}
+	if noauth := req(s, "GET", "localhost", "/_pmq/admin/releases/release-app", nil, false); noauth.Code != 401 {
+		t.Fatal("release history unauthenticated", noauth.Code)
+	}
+	pr := req(s, "POST", "localhost", "/_pmq/admin/prune/release-app?keep=1", nil, true)
+	if pr.Code != 200 {
+		t.Fatal(pr.Code, pr.Body)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "apps", "release-app", "releases", first.ActiveRelease)); err != nil {
+		t.Fatal("active release pruned", err)
+	}
+}
+
+func TestConcurrentDeployAndRollback(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "race-app", "v1")
+	hist := req(s, "GET", "localhost", "/_pmq/admin/releases/race-app", nil, true)
+	var history struct {
+		Releases []releaseInfo `json:"releases"`
+	}
+	if err := json.Unmarshal(hist.Body.Bytes(), &history); err != nil || len(history.Releases) != 1 {
+		t.Fatal(err, hist.Body)
+	}
+	old := history.Releases[0].ID
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				upload(t, s, "race-app", fmt.Sprintf("v%d", i+2))
+			} else {
+				w := req(s, "POST", "localhost", "/_pmq/admin/rollback/race-app", strings.NewReader(`{"release":"`+old+`"}`), true)
+				if w.Code != 200 {
+					t.Errorf("rollback %d: %s", w.Code, w.Body)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	active := req(s, "GET", "localhost", "/_pmq/admin/status/race-app", nil, true)
+	if active.Code != 200 {
+		t.Fatal(active.Code, active.Body)
+	}
+}
+
+func TestInterruptedActivationLeavesPointerUntouched(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "activate-app", "known")
+	base := filepath.Join(s.cfg.DataDir, "apps", "activate-app")
+	current := filepath.Join(base, "current")
+	saved := filepath.Join(base, "saved-current")
+	if err := os.Rename(current, saved); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the pointer path makes atomic rename fail after the temporary pointer is written.
+	if err := os.Mkdir(current, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.activate("activate-app", strings.Repeat("a", 32)); err == nil {
+		t.Fatal("expected activation failure")
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".current-") {
+			t.Fatalf("temporary pointer leaked: %s", e.Name())
+		}
+	}
+	if err := os.Remove(current); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(saved, current); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.releaseID("activate-app")
+	if err != nil || got == "" {
+		t.Fatalf("previous pointer was not recoverable: %q %v", got, err)
+	}
+}
 func TestAuthAndCRUDIsolation(t *testing.T) {
 	s := fixture(t, false)
 	upload(t, s, "one", "one")

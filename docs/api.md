@@ -24,4 +24,12 @@ Unauthenticated requests fail. PUT and DELETE require a matching Origin (HTTPS i
 
 Storage bucket metrics are registered in the process Prometheus registry with the fixed logical `bucket="pmq"` label. Operations, failures, duration, and transferred bytes are measured by the objstore wrapper. `GET /_pmq/admin/metrics` exposes the scrape only with the deployment bearer token; keep this administrative endpoint restricted at the reverse proxy too. Metric labels never include application names, object keys, paths, or identities.
 
-Administrative API: `POST /_pmq/admin/deploy/{name}` accepts a gzip-compressed tar of regular files and directories, at most 32 MiB compressed and uncompressed, with root `index.html`. Deploying an existing name replaces its entire active set of static files with the new archive without an overwrite prompt or merge; files omitted from the archive are no longer part of the active app. The app’s persistent data remains intact. `GET /_pmq/admin/apps` lists apps. Admin endpoints require `Authorization: Bearer <token>`. `GET /_pmq/health` is public and returns process health only. Do not expose the admin token to browser code.
+Administrative API: `POST /_pmq/admin/deploy/{name}` accepts a gzip-compressed tar of regular files and directories, at most 32 MiB compressed and uncompressed, with root `index.html`. Deploying an existing name replaces its entire active set of static files with the new archive without an overwrite prompt or merge; files omitted from the archive are no longer part of the active app. The app’s persistent documents remain intact.
+
+- `GET /_pmq/admin/status/{name}` reports the active release ID.
+- `GET /_pmq/admin/releases/{name}` lists release IDs, creation times and the active marker, newest first.
+- `POST /_pmq/admin/rollback/{name}` accepts optional `{"release":"<id>"}`; without an ID it activates the previous release. A missing or invalid release leaves the active pointer unchanged.
+- `POST /_pmq/admin/prune/{name}?keep=N` explicitly removes releases outside the N newest, always preserving the active release and the newest other release as a rollback target when one exists. N must be 1–1000. Deployment never prunes releases implicitly.
+- `GET /_pmq/admin/apps` lists apps.
+
+All administrative endpoints require `Authorization: Bearer <token>`. Deploy, rollback, and pruning operations are serialized to prevent conflicting pointer changes. `GET /_pmq/health` is public and returns process health only. Do not expose the admin token to browser code.
