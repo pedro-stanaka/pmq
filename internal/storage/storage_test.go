@@ -13,6 +13,7 @@ import (
 
 	"github.com/pmq-dev/pmq/internal/pmq"
 	"github.com/pmq-dev/pmq/internal/storage"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestStorageContract(t *testing.T) {
@@ -43,6 +44,12 @@ func TestStorageContract(t *testing.T) {
 			defer a.Delete(context.Background(), key)
 			defer b.Delete(context.Background(), key)
 			if err := a.Upload(ctx, key, strings.NewReader("one")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Head(ctx, key); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := a.List(ctx, "test/", "", 10); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := b.Get(ctx, key); !errors.Is(err, storage.ErrNotFound) {
@@ -81,6 +88,10 @@ func TestStorageContract(t *testing.T) {
 					t.Errorf("accepted app %q", bad)
 				}
 			}
+			if err := a.Delete(ctx, key); err != nil {
+				t.Fatal(err)
+			}
+			assertBucketMetrics(t, s.Registry())
 			canceled, stop := context.WithCancel(ctx)
 			stop()
 			if err := a.Upload(canceled, key, strings.NewReader("x")); !errors.Is(err, context.Canceled) {
@@ -88,6 +99,63 @@ func TestStorageContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+func assertBucketMetrics(t *testing.T, registry interface {
+	Gather() ([]*dto.MetricFamily, error)
+}) {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]*dto.MetricFamily, len(families))
+	for _, family := range families {
+		byName[family.GetName()] = family
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() != "bucket" && label.GetName() != "operation" && label.GetName() != "le" {
+					t.Errorf("unexpected high-cardinality metric label %q on %s", label.GetName(), family.GetName())
+				}
+				if label.GetName() == "bucket" && label.GetValue() != "pmq" {
+					t.Errorf("bucket label leaked provider/app name: %q", label.GetValue())
+				}
+			}
+		}
+	}
+	for _, operation := range []string{"upload", "get", "iter", "attributes", "delete"} {
+		if sampleValue(byName["objstore_bucket_operations_total"], operation) <= 0 {
+			t.Errorf("no %s operation recorded", operation)
+		}
+	}
+	if sampleValue(byName["objstore_bucket_operation_failures_total"], "get") <= 0 {
+		t.Error("expected a failed get to be recorded")
+	}
+	if sampleValue(byName["objstore_bucket_operation_duration_seconds"], "upload") <= 0 {
+		t.Error("upload duration was not recorded")
+	}
+	if sampleValue(byName["objstore_bucket_operation_transferred_bytes"], "upload") <= 0 {
+		t.Error("upload bytes were not recorded")
+	}
+}
+
+func sampleValue(family *dto.MetricFamily, operation string) float64 {
+	if family == nil {
+		return 0
+	}
+	for _, metric := range family.GetMetric() {
+		for _, label := range metric.GetLabel() {
+			if label.GetName() == "operation" && label.GetValue() == operation {
+				switch {
+				case metric.GetCounter() != nil:
+					return metric.GetCounter().GetValue()
+				case metric.GetHistogram() != nil:
+					return float64(metric.GetHistogram().GetSampleCount())
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func TestConfiguration(t *testing.T) {

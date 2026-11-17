@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io"
 	"log"
 	"mime"
@@ -96,6 +98,7 @@ type Server struct {
 	mu      sync.Mutex
 	dbs     map[string]*sql.DB
 	storage *storage.Store
+	metrics *prometheus.Registry
 }
 
 func New(c Config) (*Server, error) {
@@ -137,11 +140,12 @@ func New(c Config) (*Server, error) {
 	c.Storage.DataDir = c.DataDir
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	store, err := storage.New(ctx, c.Storage)
+	registry := prometheus.NewRegistry()
+	store, err := storage.NewWithRegistry(ctx, c.Storage, registry)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store}, nil
+	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry}, nil
 }
 func (s *Server) Close() {
 	s.mu.Lock()
@@ -204,6 +208,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/_pmq/admin/") {
+		if r.URL.Path == "/_pmq/admin/metrics" {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Token)) != 1 {
+				fail(w, 401, "unauthorized", "Valid deployment token required")
+				return
+			}
+			if r.Method != http.MethodGet {
+				fail(w, 405, "method_not_allowed", "Method not allowed")
+				return
+			}
+			promhttp.HandlerFor(s.metrics, promhttp.HandlerOpts{}).ServeHTTP(w, r)
+			return
+		}
 		s.admin(w, r)
 		return
 	}
@@ -228,6 +245,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/_pmq/") || r.URL.Path == "/_pmq" {
 		if strings.HasPrefix(r.URL.Path, "/_pmq/db/") {
 			s.documents(w, r, app)
+		} else if r.URL.Path == "/_pmq/storage" || strings.HasPrefix(r.URL.Path, "/_pmq/storage/") {
+			s.objects(w, r, app)
 		} else {
 			fail(w, 404, "not_found", "Endpoint not found")
 		}
@@ -238,6 +257,130 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.static(w, r, release)
+}
+
+const MaxObject = 32 << 20
+
+func (s *Server) objects(w http.ResponseWriter, r *http.Request, app string) {
+	store, err := s.storage.ForApp(app)
+	if err != nil {
+		fail(w, 500, "internal_error", "Storage unavailable")
+		return
+	}
+	if r.URL.Path == "/_pmq/storage" || r.URL.Path == "/_pmq/storage/" {
+		if r.Method != http.MethodGet {
+			fail(w, 405, "method_not_allowed", "Method not allowed")
+			return
+		}
+		limit := 100
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			limit, err = strconv.Atoi(raw)
+			if err != nil || limit < 1 || limit > 500 {
+				fail(w, 400, "invalid_pagination", "Limit must be 1 to 500")
+				return
+			}
+		}
+		items, next, e := store.List(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("cursor"), limit)
+		if e != nil {
+			if errors.Is(e, storage.ErrInvalidKey) {
+				fail(w, 400, "invalid_key", "Invalid key, prefix or cursor")
+			} else {
+				storageError(w, e)
+			}
+			return
+		}
+		reply(w, 200, map[string]any{"objects": items, "limit": limit, "nextCursor": next})
+		return
+	}
+	raw := strings.TrimPrefix(r.URL.EscapedPath(), "/_pmq/storage/")
+	key, err := storage.DecodeKey(raw)
+	if err != nil {
+		fail(w, 400, "invalid_key", "Invalid object key")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, MaxObject)
+		ct := r.Header.Get("Content-Type")
+		if ct == "" {
+			ct = mime.TypeByExtension(filepath.Ext(key))
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+		}
+		if _, _, e := mime.ParseMediaType(ct); e != nil {
+			fail(w, 400, "invalid_content_type", "Invalid Content-Type")
+			return
+		}
+		body := &limitedReadCloser{Reader: r.Body}
+		e := store.Upload(r.Context(), key, body)
+		if e != nil {
+			var max *http.MaxBytesError
+			if errors.As(e, &max) {
+				fail(w, 413, "object_too_large", "Object exceeds 32 MiB limit")
+			} else if errors.Is(e, storage.ErrInvalidKey) {
+				fail(w, 400, "invalid_key", "Invalid object key")
+			} else {
+				fail(w, 500, "storage_error", "Could not store object")
+			}
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	case http.MethodGet, http.MethodHead:
+		meta, e := store.Head(r.Context(), key)
+		if e != nil {
+			storageError(w, e)
+			return
+		}
+		var body io.ReadCloser
+		if r.Method == http.MethodGet {
+			body, e = store.Get(r.Context(), key)
+			if e != nil {
+				storageError(w, e)
+				return
+			}
+			defer body.Close()
+		}
+		w.Header().Set("Content-Type", meta.ContentType)
+		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
+		if modified, parseErr := time.Parse(time.RFC3339, meta.LastModified); parseErr == nil {
+			w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+		}
+		if r.Method == http.MethodHead {
+			w.WriteHeader(200)
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = io.Copy(w, body)
+	case http.MethodDelete:
+		e := store.Delete(r.Context(), key)
+		if e != nil {
+			storageError(w, e)
+			return
+		}
+		w.WriteHeader(204)
+	default:
+		w.Header().Set("Allow", "GET, HEAD, PUT, DELETE")
+		fail(w, 405, "method_not_allowed", "Method not allowed")
+	}
+}
+
+type limitedReadCloser struct{ io.Reader }
+
+func (l *limitedReadCloser) Close() error {
+	if c, ok := l.Reader.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+func storageError(w http.ResponseWriter, err error) {
+	if errors.Is(err, storage.ErrNotFound) {
+		fail(w, 404, "object_not_found", "Object does not exist")
+	} else if errors.Is(err, storage.ErrInvalidKey) {
+		fail(w, 400, "invalid_key", "Invalid object key")
+	} else {
+		fail(w, 500, "storage_error", "Storage operation failed")
+	}
 }
 func (s *Server) current(app string) (string, error) {
 	b, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "apps", app, "current"))

@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -139,6 +141,9 @@ func TestAuthAndCRUDIsolation(t *testing.T) {
 	if w := req(s, "POST", host, "/_pmq/db/tasks", strings.NewReader(`{"title":"hi"}`), false); w.Code != 401 {
 		t.Fatal(w.Code)
 	}
+	if w := req(s, "PUT", host, "/_pmq/storage/secret.txt", strings.NewReader("no"), false); w.Code != 401 {
+		t.Fatalf("unauthenticated storage mutation: %d", w.Code)
+	}
 	r = httptest.NewRequest("POST", "http://"+host+"/_pmq/db/tasks", strings.NewReader(`{}`))
 	r.RemoteAddr = "127.0.0.1:1234"
 	r.Header.Set("X-PMQ-User", "alice")
@@ -220,6 +225,172 @@ func TestConcurrentWrites(t *testing.T) {
 	}
 	if _, e := os.Stat(filepath.Join(s.cfg.DataDir, "state", "one", "data.sqlite")); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestStorageHTTPCRUDAndIsolation(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "one", "one")
+	upload(t, s, "two", "two")
+	host := "one.apps.localhost"
+	call := func(method, h, p string, body io.Reader, origin bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "http://"+h+p, body)
+		r.Host = h
+		if origin {
+			r.Header.Set("Origin", "http://"+h)
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("PUT", host, "/_pmq/storage/folder%2Fnote.txt", strings.NewReader("binary\x00data"), false); w.Code != 403 {
+		t.Fatalf("csrf %d", w.Code)
+	}
+	w := call("PUT", host, "/_pmq/storage/folder%2Fnote.txt", strings.NewReader("binary\x00data"), true)
+	if w.Code != 201 {
+		t.Fatalf("put %d %s", w.Code, w.Body)
+	}
+	if w = call("DELETE", host, "/_pmq/storage/folder%2Fnote.txt", nil, false); w.Code != 403 {
+		t.Fatalf("cross-origin delete %d", w.Code)
+	}
+	w = call("GET", host, "/_pmq/storage/folder%2Fnote.txt", nil, false)
+	if w.Code != 200 || w.Body.String() != "binary\x00data" {
+		t.Fatalf("get %d %q", w.Code, w.Body.String())
+	}
+	w = call("HEAD", host, "/_pmq/storage/folder%2Fnote.txt", nil, false)
+	if w.Code != 200 || w.Header().Get("Content-Length") != "11" || w.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Fatalf("head %d %#v", w.Code, w.Header())
+	}
+	if _, err := http.ParseTime(w.Header().Get("Last-Modified")); err != nil {
+		t.Fatalf("Last-Modified is not an HTTP date: %q (%v)", w.Header().Get("Last-Modified"), err)
+	}
+	w = call("GET", "two.apps.localhost", "/_pmq/storage/folder%2Fnote.txt", nil, false)
+	if w.Code != 404 {
+		t.Fatalf("cross-app %d", w.Code)
+	}
+	w = call("GET", host, "/_pmq/storage", nil, false)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "folder/note.txt") {
+		t.Fatalf("list %d %s", w.Code, w.Body)
+	}
+	for _, p := range []string{"/_pmq/storage/%2e%2e/secret", "/_pmq/storage/a//b", "/_pmq/storage/%00", "/_pmq/storage/%FF"} {
+		w = call("GET", host, p, nil, false)
+		if w.Code != 400 {
+			t.Errorf("invalid %s: %d", p, w.Code)
+		}
+	}
+	w = call("GET", host, "/_pmq/storage/missing", nil, false)
+	if w.Code != 404 || w.Header().Get("Content-Length") != "" || w.Header().Get("Last-Modified") != "" || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("missing %d", w.Code)
+	}
+	w = call("DELETE", host, "/_pmq/storage/folder%2Fnote.txt", nil, true)
+	if w.Code != 204 {
+		t.Fatalf("delete %d %s", w.Code, w.Body)
+	}
+	w = call("GET", host, "/_pmq/storage/folder%2Fnote.txt", nil, false)
+	if w.Code != 404 {
+		t.Fatalf("post-delete %d", w.Code)
+	}
+	for _, item := range []struct {
+		key  string
+		body []byte
+	}{{"empty.bin", nil}, {"binary.bin", []byte{0, 1, 255, 0}}} {
+		w = call("PUT", host, "/_pmq/storage/"+item.key, bytes.NewReader(item.body), true)
+		if w.Code != 201 {
+			t.Fatalf("put %s: %d %s", item.key, w.Code, w.Body)
+		}
+		w = call("GET", host, "/_pmq/storage/"+item.key, nil, false)
+		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), item.body) {
+			t.Fatalf("get %s: %d %v", item.key, w.Code, w.Body.Bytes())
+		}
+	}
+	for _, key := range []string{"a_", "a-", "a.", "a", "a~", "a/child"} {
+		w = call("PUT", host, "/_pmq/storage/"+url.PathEscape(key), strings.NewReader(key), true)
+		if w.Code != 201 {
+			t.Fatalf("put %q: %d %s", key, w.Code, w.Body)
+		}
+	}
+	seen := []string{}
+	cursor := ""
+	for {
+		p := "/_pmq/storage?limit=2"
+		if cursor != "" {
+			p += "&cursor=" + url.QueryEscape(cursor)
+		}
+		w = call("GET", host, p, nil, false)
+		if w.Code != 200 {
+			t.Fatalf("page %d %s", w.Code, w.Body)
+		}
+		var page struct {
+			Objects []struct {
+				Key string `json:"key"`
+			} `json:"objects"`
+			Next string `json:"nextCursor"`
+		}
+		if e := json.Unmarshal(w.Body.Bytes(), &page); e != nil {
+			t.Fatal(e)
+		}
+		for _, o := range page.Objects {
+			seen = append(seen, o.Key)
+		}
+		cursor = page.Next
+		if cursor == "" {
+			break
+		}
+	}
+	want := append([]string(nil), seen...)
+	sort.Strings(want)
+	if strings.Join(seen, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("pagination order got %v want %v", seen, want)
+	}
+	expected := []string{"a", "a-", "a.", "a/child", "a_", "a~", "binary.bin", "empty.bin"}
+	if strings.Join(seen, "\x00") != strings.Join(expected, "\x00") {
+		t.Fatalf("pagination entries got %v want %v", seen, expected)
+	}
+	w = call("PUT", host, "/_pmq/storage/large.bin", strings.NewReader(strings.Repeat("x", MaxObject+1)), true)
+	if w.Code != 413 {
+		t.Fatalf("large %d %s", w.Code, w.Body)
+	}
+}
+
+func TestStorageMetricsScrapeRestrictedAndLowCardinality(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "one", "x")
+	call := func(method, path, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "http://localhost"+path, nil)
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("GET", "/_pmq/admin/metrics", ""); w.Code != 401 {
+		t.Fatal(w.Code)
+	}
+	if w := call("GET", "/_pmq/admin/metrics", "secret"); w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	callObj := func(method, path string, body io.Reader) {
+		r := httptest.NewRequest(method, "http://one.apps.localhost"+path, body)
+		r.Host = "one.apps.localhost"
+		r.Header.Set("Origin", "http://one.apps.localhost")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+	}
+	callObj("PUT", "/_pmq/storage/private-key.txt", strings.NewReader("abc"))
+	callObj("GET", "/_pmq/storage/private-key.txt", nil)
+	callObj("GET", "/_pmq/storage/no-such-key", nil)
+	w := call("GET", "/_pmq/admin/metrics", "secret")
+	body := w.Body.String()
+	for _, metric := range []string{"objstore_bucket_operations_total{bucket=\"pmq\",operation=\"upload\"}", "objstore_bucket_operation_failures_total{bucket=\"pmq\",operation=\"get\"}", "objstore_bucket_operation_duration_seconds_bucket{bucket=\"pmq\",operation=\"upload\"", "objstore_bucket_operation_transferred_bytes_bucket{bucket=\"pmq\",operation=\"upload\""} {
+		if !strings.Contains(body, metric) {
+			t.Errorf("missing metric %q", metric)
+		}
+	}
+	for _, secret := range []string{"private-key.txt", "apps/one", "one.apps.localhost"} {
+		if strings.Contains(body, secret) {
+			t.Errorf("high cardinality label leaked %q", secret)
+		}
 	}
 }
 func TestConfigurationFailsClosed(t *testing.T) {

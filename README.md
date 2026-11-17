@@ -2,7 +2,7 @@
 
 **Build it. Drop it. Run it.**
 
-PMQ hosts static applications and per-app JSON documents in one Go process. Deploy a built directory over HTTP and reach it at its own hostname. SQLite and release files live on local disk. PMQ does not run application backend code or provide user accounts, hard tenant isolation, a storage HTTP API, or AI access.
+PMQ hosts static applications, per-app JSON documents, and per-app object storage in one Go process. Deploy a built directory over HTTP and reach it at its own hostname. SQLite and release files live on local disk. PMQ does not run application backend code or provide user accounts, hard tenant isolation, or AI access.
 
 **PMQ is a full-trust system. Deploy it only when you trust every user who can access PMQ and its applications.** It is designed for a trusted group, not mutually untrusted users. Authentication restricts access to that group; it does not provide per-user data isolation.
 
@@ -51,6 +51,8 @@ Open `https://hello-world.pmq.dev:8443`. The script installs mkcert's local CA i
 
 Built-in TLS is available only with `--dev` on a literal loopback address; it does not authenticate users and is not a production TLS option. The deployment token is still required. `.dev` uses HTTPS-only browser policies, so use the HTTPS URL above.
 
+The `hello-world` example demonstrates both document persistence and object storage: add a note, choose a file, upload it, then use the listed link to download it or the button to delete it. Files are private to the app hostname and survive frontend redeployments.
+
 Create and list documents using the app origin. Browser writes automatically send an Origin; curl must supply one:
 
 ```sh
@@ -72,7 +74,7 @@ For Docker, copy `.env.example` to `.env`, replace all values, especially the tr
 
 ## Object storage configuration
 
-PMQ initializes a Thanos objstore bucket at startup. The default `PMQ_STORAGE_PROVIDER=filesystem` stores objects under `data/objects/` (or `PMQ_DATA_DIR/objects/`) and needs no cloud credentials. This milestone provides the internal storage layer only; browser storage endpoints are not implemented yet.
+PMQ initializes a Thanos objstore bucket at startup. The default `PMQ_STORAGE_PROVIDER=filesystem` stores objects under `data/objects/` (or `PMQ_DATA_DIR/objects/`) and needs no cloud credentials. Apps can upload, retrieve, inspect, list, and delete their own objects through `/_pmq/storage/*`; see [API](docs/api.md). Requests use the trusted proxy identity and Origin checks used by document writes and are scoped by the validated application hostname. Bucket metrics are registered in the process Prometheus registry. `GET /_pmq/admin/metrics` requires the deployment bearer token and should also be restricted at the proxy.
 
 To select an existing S3-compatible bucket, set `PMQ_STORAGE_PROVIDER=s3`, `PMQ_S3_ENDPOINT` (host and optional port, without a scheme), `PMQ_S3_REGION`, `PMQ_S3_BUCKET`, `PMQ_S3_ACCESS_KEY`, and `PMQ_S3_SECRET_KEY`. An optional `PMQ_S3_SESSION_TOKEN` supports temporary credentials. TLS is enabled by default; `PMQ_S3_INSECURE=true` disables it. Set `PMQ_S3_PATH_STYLE=true` for services requiring path-style addressing. Store credentials as environment secrets, never in browser code or committed files. Compose forwards these variables; see `.env.example`. PMQ checks bucket listing access at startup and fails if configuration or credentials are invalid. The credentials need list access to the `apps/` prefix and read, write, and delete access to objects under it; provision the bucket separately.
 
@@ -84,4 +86,4 @@ Back up the local `objects/` directory with the rest of PMQ data. With S3, objec
 
 A validated hostname selects an app; its active immutable release serves files, while a separate SQLite database stores documents. Deployments stage and validate archives then atomically replace a release pointer. See [architecture](docs/architecture.md). Data layout version 1 stores releases under `data/apps/` and databases under `data/state/`. Back up the **entire data directory**, including SQLite WAL files. Stop PMQ for a consistent filesystem backup, or use a SQLite-aware online backup plus a coordinated release snapshot. Test restores. Releases are retained indefinitely; there is no rollback, deletion, or garbage collection command yet.
 
-This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. Reserved storage and AI routes currently return 404. Future milestones may add storage HTTP APIs, an AI gateway, rollback, and deployment management; OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
+This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. The AI route remains reserved and returns 404. Future milestones may add an AI gateway, rollback, and deployment management; OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
