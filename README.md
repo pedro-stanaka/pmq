@@ -68,6 +68,10 @@ curl -H 'Host: hello-world.apps.localhost:8080' http://127.0.0.1:8080/_pmq/db/ta
 See [API](docs/api.md) and [development](docs/development.md) for the complete contract.
 See [observability](docs/observability.md) for the restricted Prometheus scrape endpoint, metric labels, scrape configuration, and sample queries.
 
+## Browser SDK
+
+The small TypeScript client in `sdk/` calls documents, storage, and the AI gateway through relative `/_pmq/` URLs. It uses `credentials: "same-origin"` so the browser's existing reverse-proxy session is sent; it never accepts or stores a deployment token, provider key, or identity. See the [SDK guide](docs/sdk.md) for a plain JavaScript example and a runnable Vite app. AI stream iteration follows the server's SSE contract and reads on demand, so consumers can pause or stop without buffering the whole response.
+
 ## Production and proxy contract
 
 Run behind an HTTPS reverse proxy that authenticates **every** application request. Set `PMQ_DOMAIN`, a long random `PMQ_DEPLOY_TOKEN`, and `PMQ_TRUSTED_PROXIES` to the exact source IPs or CIDRs of your proxy as observed by PMQ. `PMQ_IDENTITY_HEADER` defaults to `X-PMQ-User`. The proxy must remove all client-supplied instances of that header and set exactly one nonempty identity after successful authentication. It must preserve the application Host and original HTTPS Origin, and must not let unauthenticated traffic reach PMQ through a trusted source. PMQ checks the TCP peer, never `X-Forwarded-For`. Restrict direct network access to the server and proxy; a trusted source that forwards unfiltered traffic can forge identities. Do not trust all private addresses. Production startup fails without a token and configured trusted proxy; application static files and APIs require identity. The health endpoint is unauthenticated.

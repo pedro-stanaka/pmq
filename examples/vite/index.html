@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PMQ SDK example</title>
+  </head>
+  <body>
+    <main>
+      <h1>PMQ browser client</h1>
+      <p>This Vite app uses same-origin PMQ document, storage, and AI APIs.</p>
+      <form id="note-form">
+        <label>Note <input name="title" required value="Hello from Vite" /></label>
+        <button>Add note</button>
+      </form>
+      <button id="ask-ai" type="button">Ask AI</button>
+      <pre id="output" aria-live="polite">Loading…</pre>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

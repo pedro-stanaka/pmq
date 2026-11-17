@@ -4,6 +4,7 @@ package storage
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -202,7 +203,8 @@ func (a *App) Head(ctx context.Context, key string) (Object, error) {
 	}
 	object := Object{Key: key, Size: attrs.Size, LastModified: attrs.LastModified.UTC().Format("2006-01-02T15:04:05Z07:00"), ContentType: contentType(key)}
 	if attrs.Version != nil && attrs.Version.Type == objstore.ETag && attrs.Version.Value != "" {
-		object.ETag = `"` + strings.ReplaceAll(attrs.Version.Value, `"`, `\"`) + `"`
+		// Versions may contain binary bytes, which cannot appear in HTTP headers.
+		object.ETag = `"` + hex.EncodeToString([]byte(attrs.Version.Value)) + `"`
 	}
 	return object, nil
 }
