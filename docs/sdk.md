@@ -1,6 +1,6 @@
 # Browser SDK
 
-`@pmq-dev/client` is a dependency-light TypeScript client for application browser code. It is currently a private workspace package and is not published to a registry. The Vite example is runnable from this repository; see [examples/vite](../examples/vite/README.md).
+`@pmq-dev/client` is a dependency-light TypeScript client for application browser code. It is currently a private workspace package and is not published to a registry. The Vite example is runnable from this repository; see [examples/vite](https://github.com/pedro-stanaka/pmq/blob/main/examples/vite/README.md).
 
 ```ts
 import { createPMQClient, PMQError } from "@pmq-dev/client";

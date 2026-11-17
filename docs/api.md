@@ -52,4 +52,4 @@ Administrative API: `POST /_pmq/admin/deploy/{name}` accepts a gzip-compressed t
 
 All administrative endpoints require `Authorization: Bearer <token>`. Deploy, rollback, and pruning operations are serialized to prevent conflicting pointer changes. `GET /_pmq/health` is public and returns process health only. Do not expose the admin token to browser code.
 
-The reverse proxy should deny `/_pmq/admin/*` on ordinary app hostnames and expose admin routes only on a separately protected operator path/hostname. This is an additional ingress boundary; PMQ still requires the bearer deployment token. See the [Caddy recipe](proxy/caddy.md).
+The reverse proxy should deny `/_pmq/admin/*` on ordinary app hostnames and expose admin routes only on a separately protected operator path/hostname. This is an additional ingress boundary; PMQ still requires the bearer deployment token. See the [Caddy recipe](https://github.com/pedro-stanaka/pmq/blob/main/docs/proxy/caddy.md).
