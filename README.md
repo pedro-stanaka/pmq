@@ -175,3 +175,7 @@ For private LAN/tailnet ingress, split DNS, and reachability checks, see [privat
 For the optional production Compose/Komodo recipe and offline backup/restore drill, see [production and recovery](docs/proxy/production.md).
 
 Agents can use the [deployment and operations skill](skills/pmq-deploy/SKILL.md) for build, verification, rollback, and troubleshooting.
+
+## One-command local smoke test
+
+Run `./scripts/smoke-test.sh` from the repository root. It builds the vanilla example into a temporary output directory, deploys it to a disposable local PMQ HTTP server, exercises documents, local objects and mocked AI, redeploys, and rolls back. It also runs the deployment skill's CLI failure checks. Go is required; no homelab, OAuth credentials, paid provider, or persistent user data are used. For production checks and backup verification, use the [production and recovery checklist](docs/proxy/production.md).
