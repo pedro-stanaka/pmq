@@ -77,8 +77,8 @@ before(async () => {
     cwd: repo,
     env: {
       ...process.env,
-      PMQ_AI_PROVIDER: 'openai',
-      PMQ_AI_MODELS: 'fast=test-model',
+      PMQ_AI_MODELS: 'fast=openai|test-model|stream',
+      PMQ_AI_DEFAULT_MODEL: 'fast',
       PMQ_OPENAI_BASE_URL: `http://127.0.0.1:${aiPort}/v1`,
       OPENAI_API_KEY: 'integration-test-key',
     },
@@ -178,19 +178,11 @@ test('non-streaming AI completion uses the real PMQ gateway endpoint', async () 
   assert.equal(completion.choices[0].message.content, 'hello from test provider');
 });
 
-test('AI streaming uses the real PMQ gateway when the server supports the #6 streaming contract', async (t) => {
-  try {
-    const chunks = [];
-    for await (const chunk of client.ai.stream({ model: 'fast', messages: [{ role: 'user', content: 'hello' }] })) chunks.push(chunk);
-    assert.equal(chunks.filter((event) => event.type === 'chunk').at(-1).chunk.choices[0].finish_reason, 'stop');
-    assert.equal(chunks.map((event) => event.type === 'chunk' ? event.chunk.choices[0].delta.content ?? '' : '').join(''), 'hello from test provider');
-  } catch (error) {
-    if (error instanceof PMQError && error.status === 400) {
-      t.skip('this worktree predates the #6 streaming server implementation; rerun after stacking #6');
-      return;
-    }
-    throw error;
-  }
+test('AI streaming uses the real PMQ gateway', async () => {
+  const chunks = [];
+  for await (const chunk of client.ai.stream({ model: 'fast', messages: [{ role: 'user', content: 'hello' }] })) chunks.push(chunk);
+  assert.equal(chunks.filter((event) => event.type === 'chunk').at(-1).chunk.choices[0].finish_reason, 'stop');
+  assert.equal(chunks.map((event) => event.type === 'chunk' ? event.chunk.choices[0].delta.content ?? '' : '').join(''), 'hello from test provider');
 });
 
 test('AI stream yields incrementally, preserves typed errors and cancels on early exit', async () => {
