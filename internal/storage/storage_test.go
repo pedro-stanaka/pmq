@@ -136,8 +136,10 @@ func assertBucketMetrics(t *testing.T, registry interface {
 		t.Fatal(err)
 	}
 	byName := make(map[string]*dto.MetricFamily, len(families))
+	familyCounts := make(map[string]int, len(families))
 	for _, family := range families {
 		byName[family.GetName()] = family
+		familyCounts[family.GetName()]++
 		for _, metric := range family.GetMetric() {
 			for _, label := range metric.GetLabel() {
 				if label.GetName() != "bucket" && label.GetName() != "operation" && label.GetName() != "le" {
@@ -148,6 +150,9 @@ func assertBucketMetrics(t *testing.T, registry interface {
 				}
 			}
 		}
+	}
+	if familyCounts["objstore_bucket_operations_total"] != 1 {
+		t.Errorf("objstore operation family registered %d times", familyCounts["objstore_bucket_operations_total"])
 	}
 	for _, operation := range []string{"upload", "get", "get_range", "iter", "attributes", "delete"} {
 		if sampleValue(byName["objstore_bucket_operations_total"], operation) <= 0 {

@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -699,6 +701,170 @@ func TestStorageMetricsScrapeRestrictedAndLowCardinality(t *testing.T) {
 	for _, secret := range []string{"private-key.txt", "apps/one", "one.apps.localhost"} {
 		if strings.Contains(body, secret) {
 			t.Errorf("high cardinality label leaked %q", secret)
+		}
+	}
+}
+
+func scrapeMetrics(t *testing.T, s *Server) string {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "http://localhost/_pmq/admin/metrics", nil)
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("metrics scrape: %d %s", w.Code, w.Body)
+	}
+	return w.Body.String()
+}
+
+func TestUnifiedMetricsDocumentAndStorageOperations(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "one", "one")
+	upload(t, s, "two", "two")
+	host := "one.apps.localhost"
+	created := req(s, http.MethodPost, host, "/_pmq/db/private-collection", strings.NewReader(`{"v":1}`), true)
+	if created.Code != http.StatusCreated {
+		t.Fatal(created.Code, created.Body)
+	}
+	var doc document
+	if err := json.Unmarshal(created.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	path := "/_pmq/db/private-collection/" + doc.ID
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodGet, path, ""},
+		{http.MethodGet, "/_pmq/db/private-collection", ""},
+		{http.MethodPut, path, `{"v":2}`},
+		{http.MethodDelete, path, ""},
+		{http.MethodGet, path, ""}, // not found
+	} {
+		w := req(s, tc.method, host, tc.path, strings.NewReader(tc.body), true)
+		if tc.method == http.MethodGet && tc.path == path {
+			// The second read is intentionally absent after DELETE.
+			if w.Code != http.StatusOK && w.Code != http.StatusNotFound {
+				t.Fatalf("%s %s: %d %s", tc.method, tc.path, w.Code, w.Body)
+			}
+		} else if w.Code >= 500 {
+			t.Fatalf("%s %s: %d %s", tc.method, tc.path, w.Code, w.Body)
+		}
+	}
+	if w := req(s, http.MethodPut, host, "/_pmq/storage/object.bin", strings.NewReader("payload"), true); w.Code != http.StatusCreated {
+		t.Fatal(w.Code, w.Body)
+	}
+	if w := req(s, http.MethodGet, host, "/_pmq/storage/object.bin", nil, false); w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body)
+	}
+	if w := req(s, http.MethodGet, host, "/_pmq/storage", nil, false); w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body)
+	}
+	if w := req(s, http.MethodDelete, host, "/_pmq/storage/object.bin", nil, true); w.Code != http.StatusNoContent {
+		t.Fatal(w.Code, w.Body)
+	}
+	// A directory at the filesystem provider's object path makes replacement fail
+	// after the request reaches the provider, exercising its bounded error outcome.
+	encoded := base64.RawURLEncoding.EncodeToString([]byte("provider-error"))
+	if err := os.MkdirAll(filepath.Join(s.cfg.DataDir, "objects", "apps", "one", encoded), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if w := req(s, http.MethodPut, host, "/_pmq/storage/provider-error", strings.NewReader("x"), true); w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected provider error, got %d %s", w.Code, w.Body)
+	}
+	metrics := scrapeMetrics(t, s)
+	for _, want := range []string{
+		`pmq_sqlite_document_operations_total{operation="create",outcome="success"} 1`,
+		`pmq_sqlite_document_operations_total{operation="list",outcome="success"} 1`,
+		`pmq_sqlite_document_operations_total{operation="get",outcome="success"} 1`,
+		`pmq_sqlite_document_operations_total{operation="update",outcome="success"} 1`,
+		`pmq_sqlite_document_operations_total{operation="delete",outcome="success"} 1`,
+		`pmq_sqlite_document_operations_total{operation="get",outcome="not_found"} 1`,
+		`pmq_sqlite_document_rows_returned_total{operation="list"} 1`,
+		`pmq_http_request_duration_seconds_bucket{method="POST",route="/_pmq/db/{collection}"`,
+		`pmq_storage_http_operations_total{operation="upload",outcome="success"} 1`,
+		`pmq_storage_http_operations_total{operation="download",outcome="success"} 1`,
+		`pmq_storage_http_operations_total{operation="list",outcome="success"} 1`,
+		`pmq_storage_http_operations_total{operation="delete",outcome="success"} 1`,
+		`pmq_storage_http_operations_total{operation="upload",outcome="provider_error"} 1`,
+		`objstore_bucket_operations_total{bucket="pmq",operation="upload"}`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	for _, private := range []string{"private-collection", doc.ID, "one.apps.localhost", "two.apps.localhost", "provider-error", "object.bin"} {
+		if strings.Contains(metrics, private) {
+			t.Errorf("metrics leaked dynamic value %q", private)
+		}
+	}
+	if w := req(s, http.MethodGet, host, "/_pmq/metrics", nil, false); w.Code != http.StatusNotFound {
+		t.Fatalf("public metrics path should not be exposed: %d", w.Code)
+	}
+}
+
+func TestMetricsConcurrentAcrossApplications(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "first", "first")
+	upload(t, s, "second", "second")
+	const writesPerApp = 24
+	var wg sync.WaitGroup
+	for _, app := range []string{"first", "second"} {
+		app := app
+		for i := 0; i < writesPerApp; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				host := app + ".apps.localhost"
+				w := req(s, http.MethodPost, host, "/_pmq/db/tasks", strings.NewReader(fmt.Sprintf(`{"n":%d}`, i)), true)
+				if w.Code != http.StatusCreated {
+					t.Errorf("%s create: %d %s", app, w.Code, w.Body)
+				}
+			}(i)
+		}
+	}
+	wg.Wait()
+	metrics := scrapeMetrics(t, s)
+	want := fmt.Sprintf(`pmq_sqlite_document_operations_total{operation="create",outcome="success"} %d`, 2*writesPerApp)
+	if !strings.Contains(metrics, want) {
+		t.Fatalf("cross-app writes not aggregated in shared registry; missing %q", want)
+	}
+	for _, private := range []string{"first.apps.localhost", "second.apps.localhost"} {
+		if strings.Contains(metrics, private) {
+			t.Errorf("metrics leaked app namespace %q", private)
+		}
+	}
+}
+
+func TestSQLiteBusyMetric(t *testing.T) {
+	s := fixture(t, true)
+	upload(t, s, "busy", "app")
+	host := "busy.apps.localhost"
+	if w := req(s, http.MethodGet, host, "/_pmq/db/tasks", nil, false); w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body)
+	}
+	pmqDB := s.dbs["busy"]
+	if _, err := pmqDB.Exec("PRAGMA busy_timeout=25"); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(s.cfg.DataDir, "state", "busy", "data.sqlite")
+	lockDB, err := sql.Open("sqlite", filename+"?_pragma=busy_timeout(25)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockDB.Close()
+	if _, err = lockDB.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lockDB.Exec("ROLLBACK")
+	w := req(s, http.MethodPost, host, "/_pmq/db/tasks", strings.NewReader(`{"blocked":true}`), true)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("busy insert should fail with 500, got %d %s", w.Code, w.Body)
+	}
+	metrics := scrapeMetrics(t, s)
+	for _, want := range []string{
+		`pmq_sqlite_document_operations_total{operation="create",outcome="busy"} 1`,
+		`pmq_sqlite_document_errors_total{error="busy",operation="create"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("busy metrics missing %q", want)
 		}
 	}
 }

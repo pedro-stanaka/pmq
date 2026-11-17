@@ -66,6 +66,7 @@ curl -H 'Host: hello-world.apps.localhost:8080' http://127.0.0.1:8080/_pmq/db/ta
 ```
 
 See [API](docs/api.md) and [development](docs/development.md) for the complete contract.
+See [observability](docs/observability.md) for the restricted Prometheus scrape endpoint, metric labels, scrape configuration, and sample queries.
 
 ## Production and proxy contract
 

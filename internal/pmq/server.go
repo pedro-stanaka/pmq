@@ -106,6 +106,14 @@ type Server struct {
 	transferCancellations *prometheus.CounterVec
 	aiProvider            ChatProvider
 	aiTimeout             time.Duration
+	httpRequests          *prometheus.CounterVec
+	httpDuration          *prometheus.HistogramVec
+	httpInFlight          *prometheus.GaugeVec
+	storageHTTP           *prometheus.CounterVec
+	dbOperations          *prometheus.CounterVec
+	dbDuration            *prometheus.HistogramVec
+	dbRowsReturned        *prometheus.CounterVec
+	dbErrors              *prometheus.CounterVec
 }
 
 func New(c Config) (*Server, error) {
@@ -148,6 +156,15 @@ func New(c Config) (*Server, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	registry := prometheus.NewRegistry()
+	httpRequests := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_http_requests_total", Help: "HTTP requests handled by PMQ."}, []string{"route", "method", "status_class"})
+	httpDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pmq_http_request_duration_seconds", Help: "HTTP request duration in seconds.", Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}}, []string{"route", "method"})
+	httpInFlight := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "pmq_http_requests_in_flight", Help: "HTTP requests currently being handled."}, []string{"route"})
+	storageHTTP := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_storage_http_operations_total", Help: "Storage API operations by bounded outcome."}, []string{"operation", "outcome"})
+	dbOperations := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_sqlite_document_operations_total", Help: "SQLite document API operations by bounded outcome."}, []string{"operation", "outcome"})
+	dbDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pmq_sqlite_document_operation_duration_seconds", Help: "SQLite document API operation duration in seconds.", Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}}, []string{"operation", "outcome"})
+	dbRowsReturned := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_sqlite_document_rows_returned_total", Help: "Rows returned by SQLite document API operations."}, []string{"operation"})
+	dbErrors := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pmq_sqlite_document_errors_total", Help: "SQLite document operation errors by bounded category."}, []string{"operation", "error"})
+	registry.MustRegister(httpRequests, httpDuration, httpInFlight, storageHTTP, dbOperations, dbDuration, dbRowsReturned, dbErrors)
 	cancellations := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pmq_storage_transfer_cancellations_total",
 		Help: "Number of storage transfers canceled by the request context.",
@@ -169,7 +186,13 @@ func New(c Config) (*Server, error) {
 	if aiTimeout <= 0 {
 		aiTimeout = 45 * time.Second
 	}
-	return &Server{cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry, transferCancellations: cancellations, aiProvider: aiProvider, aiTimeout: aiTimeout}, nil
+	return &Server{
+		cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry,
+		transferCancellations: cancellations, httpRequests: httpRequests, httpDuration: httpDuration,
+		httpInFlight: httpInFlight, storageHTTP: storageHTTP, dbOperations: dbOperations,
+		dbDuration: dbDuration, dbRowsReturned: dbRowsReturned, dbErrors: dbErrors,
+		aiProvider: aiProvider, aiTimeout: aiTimeout,
+	}, nil
 }
 func (s *Server) Close() {
 	s.mu.Lock()
@@ -222,6 +245,27 @@ func sameOrigin(r *http.Request, dev bool) bool {
 	return err == nil && (u.Scheme == "https" || (dev && u.Scheme == "http")) && strings.EqualFold(u.Host, r.Host) && u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == ""
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	route := metricRoute(r.URL.Path)
+	method := metricMethod(r.Method)
+	s.httpInFlight.WithLabelValues(route).Inc()
+	started := time.Now()
+	tracked := &responseMetricsWriter{ResponseWriter: w}
+	defer func() {
+		status := tracked.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.httpInFlight.WithLabelValues(route).Dec()
+		s.httpRequests.WithLabelValues(route, method, statusClass(status)).Inc()
+		s.httpDuration.WithLabelValues(route, method).Observe(time.Since(started).Seconds())
+		if strings.HasPrefix(route, "/_pmq/storage") {
+			s.storageHTTP.WithLabelValues(storageOperation(route, method), storageOutcome(status, r.Context().Err())).Inc()
+		}
+	}()
+	s.serveHTTP(tracked, r)
+}
+
+func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.URL.Path == "/_pmq/health" {
 		if r.Method != http.MethodGet {
@@ -283,6 +327,144 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.static(w, r, release)
+}
+
+type responseMetricsWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseMetricsWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseMetricsWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *responseMetricsWriter) ReadFrom(r io.Reader) (int64, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(r)
+	}
+	return io.Copy(w.ResponseWriter, r)
+}
+
+func (w *responseMetricsWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func metricMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodHead, http.MethodOptions:
+		return method
+	default:
+		return "OTHER"
+	}
+}
+
+func metricRoute(path string) string {
+	switch path {
+	case "/_pmq/health":
+		return path
+	case "/_pmq/admin/metrics":
+		return path
+	case "/_pmq/storage", "/_pmq/storage/":
+		return "/_pmq/storage/list"
+	}
+	switch {
+	case strings.HasPrefix(path, "/_pmq/db/"):
+		if strings.Count(strings.Trim(strings.TrimPrefix(path, "/_pmq/db/"), "/"), "/") == 0 {
+			return "/_pmq/db/{collection}"
+		}
+		return "/_pmq/db/{collection}/{id}"
+	case strings.HasPrefix(path, "/_pmq/storage/"):
+		return "/_pmq/storage/{key}"
+	case strings.HasPrefix(path, "/_pmq/admin/deploy/"):
+		return "/_pmq/admin/deploy/{name}"
+	case strings.HasPrefix(path, "/_pmq/admin/status/"):
+		return "/_pmq/admin/status/{name}"
+	case strings.HasPrefix(path, "/_pmq/admin/releases/"):
+		return "/_pmq/admin/releases/{name}"
+	case strings.HasPrefix(path, "/_pmq/admin/rollback/"):
+		return "/_pmq/admin/rollback/{name}"
+	case strings.HasPrefix(path, "/_pmq/admin/prune/"):
+		return "/_pmq/admin/prune/{name}"
+	case strings.HasPrefix(path, "/_pmq/admin/"):
+		return "/_pmq/admin/other"
+	case strings.HasPrefix(path, "/_pmq/"):
+		return "/_pmq/other"
+	default:
+		return "/static"
+	}
+}
+
+func statusClass(status int) string {
+	switch status / 100 {
+	case 1:
+		return "1xx"
+	case 2:
+		return "2xx"
+	case 3:
+		return "3xx"
+	case 4:
+		return "4xx"
+	case 5:
+		return "5xx"
+	default:
+		return "other"
+	}
+}
+
+func storageOperation(route, method string) string {
+	if route == "/_pmq/storage/list" {
+		return "list"
+	}
+	switch method {
+	case http.MethodPut:
+		return "upload"
+	case http.MethodGet:
+		return "download"
+	case http.MethodHead:
+		return "head"
+	case http.MethodDelete:
+		return "delete"
+	default:
+		return "other"
+	}
+}
+
+func storageOutcome(status int, ctxErr error) string {
+	if ctxErr != nil {
+		return "canceled"
+	}
+	switch status {
+	case 200, 201, 204, 206:
+		return "success"
+	case 404:
+		return "not_found"
+	case 401:
+		return "unauthorized"
+	case 403:
+		return "forbidden"
+	case 413:
+		return "too_large"
+	default:
+		if status >= 500 {
+			return "provider_error"
+		}
+		if status >= 400 {
+			return "rejected"
+		}
+		return "other"
+	}
 }
 
 const MaxObject = 32 << 20
@@ -976,6 +1158,57 @@ func (s *Server) db(app string) (*sql.DB, error) {
 	return db, nil
 }
 
+func documentOperation(parts []string, method string) string {
+	if len(parts) == 1 {
+		if method == http.MethodPost {
+			return "create"
+		}
+		if method == http.MethodGet {
+			return "list"
+		}
+	}
+	if len(parts) == 2 {
+		switch method {
+		case http.MethodGet:
+			return "get"
+		case http.MethodPut:
+			return "update"
+		case http.MethodDelete:
+			return "delete"
+		}
+	}
+	return "other"
+}
+
+func sqliteErrorCategory(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "canceled"
+	}
+	var coded interface{ Code() int }
+	if errors.As(err, &coded) {
+		switch coded.Code() & 0xff {
+		case 5:
+			return "busy"
+		case 6:
+			return "locked"
+		case 19:
+			return "constraint"
+		}
+	}
+	return "other"
+}
+
+func (s *Server) recordDBOperation(operation, outcome string, started time.Time, rows int, err error) {
+	s.dbOperations.WithLabelValues(operation, outcome).Inc()
+	s.dbDuration.WithLabelValues(operation, outcome).Observe(time.Since(started).Seconds())
+	if rows > 0 {
+		s.dbRowsReturned.WithLabelValues(operation).Add(float64(rows))
+	}
+	if err != nil {
+		s.dbErrors.WithLabelValues(operation, sqliteErrorCategory(err)).Inc()
+	}
+}
+
 type document struct {
 	ID         string          `json:"id"`
 	Collection string          `json:"collection"`
@@ -998,9 +1231,16 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request, app string) {
 		return
 	}
 	collection := parts[0]
+	operation := documentOperation(parts, r.Method)
+	if operation == "other" {
+		fail(w, 405, "method_not_allowed", "Method not allowed")
+		return
+	}
+	dbStarted := time.Now()
 	db, err := s.db(app)
 	if err != nil {
 		log.Printf("database open: %v", err)
+		s.recordDBOperation(operation, sqliteErrorCategory(err), dbStarted, 0, err)
 		fail(w, 500, "internal_error", "Database unavailable")
 		return
 	}
@@ -1023,6 +1263,7 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request, app string) {
 		}
 		rows, e := db.QueryContext(r.Context(), `SELECT id,collection,data,created_at,updated_at FROM documents WHERE collection=? ORDER BY created_at,id LIMIT ? OFFSET ?`, collection, limit, offset)
 		if e != nil {
+			s.recordDBOperation(operation, sqliteErrorCategory(e), dbStarted, 0, e)
 			fail(w, 500, "internal_error", "Database error")
 			return
 		}
@@ -1031,42 +1272,56 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request, app string) {
 		for rows.Next() {
 			d, e := scan(rows)
 			if e != nil {
+				s.recordDBOperation(operation, sqliteErrorCategory(e), dbStarted, len(docs), e)
 				fail(w, 500, "internal_error", "Database error")
 				return
 			}
 			docs = append(docs, d)
 		}
 		if rows.Err() != nil {
+			s.recordDBOperation(operation, sqliteErrorCategory(rows.Err()), dbStarted, len(docs), rows.Err())
 			fail(w, 500, "internal_error", "Database error")
 			return
 		}
+		s.recordDBOperation(operation, "success", dbStarted, len(docs), nil)
 		reply(w, 200, map[string]any{"documents": docs, "limit": limit, "offset": offset})
 		return
 	}
 	if len(parts) == 2 && r.Method == http.MethodGet {
 		d, e := scan(db.QueryRowContext(r.Context(), `SELECT id,collection,data,created_at,updated_at FROM documents WHERE collection=? AND id=?`, collection, parts[1]))
 		if errors.Is(e, sql.ErrNoRows) {
+			s.recordDBOperation(operation, "not_found", dbStarted, 0, nil)
 			fail(w, 404, "document_not_found", "Document does not exist")
 			return
 		}
 		if e != nil {
+			s.recordDBOperation(operation, sqliteErrorCategory(e), dbStarted, 0, e)
 			fail(w, 500, "internal_error", "Database error")
 			return
 		}
+		s.recordDBOperation(operation, "success", dbStarted, 1, nil)
 		reply(w, 200, d)
 		return
 	}
 	if len(parts) == 2 && r.Method == http.MethodDelete {
 		res, e := db.ExecContext(r.Context(), `DELETE FROM documents WHERE collection=? AND id=?`, collection, parts[1])
 		if e != nil {
+			s.recordDBOperation(operation, sqliteErrorCategory(e), dbStarted, 0, e)
 			fail(w, 500, "internal_error", "Database error")
 			return
 		}
-		n, _ := res.RowsAffected()
+		n, e := res.RowsAffected()
+		if e != nil {
+			s.recordDBOperation(operation, sqliteErrorCategory(e), dbStarted, 0, e)
+			fail(w, 500, "internal_error", "Database error")
+			return
+		}
 		if n == 0 {
+			s.recordDBOperation(operation, "not_found", dbStarted, 0, nil)
 			fail(w, 404, "document_not_found", "Document does not exist")
 			return
 		}
+		s.recordDBOperation(operation, "success", dbStarted, 0, nil)
 		w.WriteHeader(204)
 		return
 	}
@@ -1083,6 +1338,7 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request, app string) {
 			return
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
+		started := time.Now()
 		id := ""
 		if len(parts) == 1 {
 			id, e = randomID()
@@ -1094,22 +1350,31 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request, app string) {
 			var result sql.Result
 			result, e = db.ExecContext(r.Context(), `UPDATE documents SET data=?,updated_at=? WHERE collection=? AND id=?`, string(b), now, collection, id)
 			if e == nil {
-				n, _ := result.RowsAffected()
+				n, rowsErr := result.RowsAffected()
+				if rowsErr != nil {
+					s.recordDBOperation(operation, sqliteErrorCategory(rowsErr), started, 0, rowsErr)
+					fail(w, 500, "internal_error", "Database error")
+					return
+				}
 				if n == 0 {
+					s.recordDBOperation(operation, "not_found", started, 0, nil)
 					fail(w, 404, "document_not_found", "Document does not exist")
 					return
 				}
 			}
 		}
 		if e != nil {
+			s.recordDBOperation(operation, sqliteErrorCategory(e), started, 0, e)
 			fail(w, 500, "internal_error", "Database error")
 			return
 		}
 		d, e := scan(db.QueryRowContext(r.Context(), `SELECT id,collection,data,created_at,updated_at FROM documents WHERE collection=? AND id=?`, collection, id))
 		if e != nil {
+			s.recordDBOperation(operation, sqliteErrorCategory(e), started, 0, e)
 			fail(w, 500, "internal_error", "Database error")
 			return
 		}
+		s.recordDBOperation(operation, "success", started, 1, nil)
 		status := 200
 		if len(parts) == 1 {
 			status = 201
