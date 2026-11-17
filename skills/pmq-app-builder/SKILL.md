@@ -14,7 +14,7 @@ Use this skill when creating or changing a frontend intended to deploy to PMQ. P
 - To use the React/Vite template, install from its lockfile with `npm ci` and build with `npm run build`; it requires Node `^20.19.0` or `>=22.12.0`. Deploy `dist/`, never the development server or source tree.
 - PMQ serves app assets by hostname and falls back to the deployed `index.html` for unknown static paths. Client-side SPA routes can therefore load directly, but still test a refresh on a nested route.
 - Call app APIs using relative URLs such as `fetch('/_pmq/db/tasks')`. Do not hard-code the PMQ server hostname or make browser requests directly to provider services.
-- Use raw `fetch` for the current stable HTTP API. Choose an SDK only when its versioned compatibility with the deployed PMQ server is confirmed. The browser SDK is not part of this branch; follow-up #14 is developing it.
+- Use raw `fetch` for a small dependency-free app, or the typed browser client for projects that benefit from typed errors and streaming. The client is a private workspace package, not a published registry package; see the repository's [SDK guide](../../docs/sdk.md) and confirm compatibility with the deployed server.
 
 ## Trust and data rules
 
@@ -30,7 +30,7 @@ Use this skill when creating or changing a frontend intended to deploy to PMQ. P
 - For a plain JavaScript app, start from [vanilla](assets/templates/vanilla/).
 - For React and TypeScript, start from [React/Vite](assets/templates/react-vite-ts/).
 
-The `v1` reference names this skill's snapshot of the current API paths; it does not mean that PMQ negotiates an HTTP API version. Check the linked API docs and server before relying on a capability. AI chat is text-only; streaming is available only for configured model aliases whose provider supports it. The browser SDK (#14) is a separate follow-up; use raw `fetch` until its compatibility is confirmed.
+The `v1` reference names this skill's snapshot of the current API paths; it does not mean that PMQ negotiates an HTTP API version. Check the linked API docs and server before relying on a capability. AI chat is text-only; streaming is available only for configured model aliases whose provider supports it. The typed browser SDK is optional; raw `fetch` works with the same same-origin API.
 
 ## Validate
 
