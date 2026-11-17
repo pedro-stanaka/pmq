@@ -6,9 +6,19 @@ PMQ hosts static applications, per-app JSON documents, object storage, and an op
 
 **PMQ is a full-trust system. Deploy it only when you trust every user who can access PMQ and its applications.** It is designed for a trusted group, not mutually untrusted users. Authentication restricts access to that group; it does not provide per-user data isolation.
 
+## Install
+
+Released binaries, Docker images, and an Arch Linux source package are available — see [docs/distribution.md](docs/distribution.md):
+
+- Download a binary from the [releases page](https://github.com/pedro-stanaka/pmq/releases) (checksums included), or `go install github.com/pmq-dev/pmq/cmd/pmq@latest` (Go 1.27+).
+- Docker: `ghcr.io/pedro-stanaka/pmq` (multi-arch, non-root, health-checked); see `compose.yaml`.
+- Arch Linux: build from source with `packaging/arch/PKGBUILD` (`makepkg -si`).
+
+`pmq help` lists commands; `pmq version` reports the running release.
+
 ## Quick start
 
-Requires Go 1.27 or later. Build and run on loopback with an explicit development identity:
+For local development, Go 1.27 or later is required. Build and run on loopback with an explicit development identity:
 
 ```sh
 make build

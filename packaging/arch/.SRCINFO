@@ -7,6 +7,7 @@ pkgbase = pmq
 	arch = aarch64
 	license = MIT
 	makedepends = go
+	options = !debug
 	source = pmq-0.1.0.tar.gz::https://github.com/pedro-stanaka/pmq/archive/refs/tags/v0.1.0.tar.gz
 	sha256sums = SKIP
 
