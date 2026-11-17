@@ -56,7 +56,7 @@ Object storage provider error ratio over the last five minutes:
 ```promql
 sum(rate(pmq_storage_http_operations_total{outcome="provider_error"}[5m]))
 /
-clamp_min(sum(rate(pmq_storage_http_operations_total{operation!="other"}[5m])), 1)
+clamp_min(sum(rate(pmq_storage_http_operations_total{operation!="other"}[5m])), 1e-9)
 ```
 
 Transferred object bytes per second by operation:
