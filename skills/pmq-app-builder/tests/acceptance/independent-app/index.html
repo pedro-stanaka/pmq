@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Independent PMQ Contacts</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>Trusted contacts</h1>
+      <p>Contact records are scoped to this PMQ app.</p>
+      <form id="contact-form">
+        <label for="contact-name">Name</label>
+        <input id="contact-name" maxlength="80" required>
+        <label for="contact-email">Email</label>
+        <input id="contact-email" type="email" maxlength="254" required>
+        <button>Add contact</button>
+      </form>
+      <p id="status" role="status" aria-live="polite">Loading contacts…</p>
+      <ul id="contacts"></ul>
+    </main>
+  </body>
+</html>
