@@ -73,6 +73,8 @@ Run behind an HTTPS reverse proxy that authenticates **every** application reque
 
 Writes require an Origin matching the Host, with HTTPS in production. Configure the proxy to route `/_pmq/admin/*` only to authorized operators as an additional restriction; those endpoints independently require the bearer deployment token and do not use the user identity. Use TLS for remote deployments and protect the token. Authentication establishes a shared trust boundary, not per-user authorization: authenticated users of an app can read and change all its documents.
 
+For an existing Caddy reverse proxy, wildcard TLS, SSO identity forwarding, host/bridge network examples, and a routing smoke test, see the [Caddy integration recipe](docs/proxy/caddy.md). The regular app hostname blocks `/_pmq/admin/*`; admin requests use a separate private operator hostname and still require the PMQ bearer token.
+
 For Docker, copy `.env.example` to `.env`, replace all values, especially the trusted address with the proxy source actually visible **inside the container**, then run `docker compose up -d --build`. The port is published on host loopback only. A host proxy may appear at a Docker gateway rather than `127.0.0.1`; verify this for your network. Trusting that gateway can also trust other host processes able to connect to the published port, so restrict access accordingly or use a dedicated proxy-to-PMQ network. Compose uses production mode, so a host proxy is required. No proxy service is included.
 
 ## Object storage configuration

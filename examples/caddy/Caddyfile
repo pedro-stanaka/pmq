@@ -1,0 +1,42 @@
+# Import this snippet from the existing Caddyfile, or adapt it as a standalone file.
+# Required environment: PMQ_DOMAIN, PMQ_UPSTREAM, PMQ_AUTH_UPSTREAM,
+# CLOUDFLARE_API_TOKEN, PMQ_OPERATOR_CIDRS.
+
+*.{$PMQ_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	route {
+		# The application SSO is not sufficient for administrative endpoints.
+		@admin path /_pmq/admin /_pmq/admin/*
+		respond @admin "Not Found" 404
+
+		# Remove any caller-supplied identity before asking the auth service.
+		# The auth endpoint must return exactly one X-PMQ-User on success.
+		request_header -X-PMQ-User
+		forward_auth {$PMQ_AUTH_UPSTREAM} {
+			uri /verify
+			copy_headers X-PMQ-User
+		}
+
+		# Caddy preserves the incoming Host and Origin headers by default.
+		reverse_proxy {$PMQ_UPSTREAM}
+	}
+}
+
+# Separate operator hostname. Keep this hostname private (tailnet or LAN DNS)
+# and set PMQ_OPERATOR_CIDRS to the source addresses visible to Caddy.
+pmq-admin.{$PMQ_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	route {
+		@notAdmin not path /_pmq/admin /_pmq/admin/*
+		respond @notAdmin "Not Found" 404
+		@operator remote_ip {$PMQ_OPERATOR_CIDRS}
+		reverse_proxy @operator {$PMQ_UPSTREAM}
+		respond "Forbidden" 403
+	}
+}
