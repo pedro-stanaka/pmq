@@ -94,29 +94,25 @@ Back up the local `objects/` directory with the rest of PMQ data. With S3, objec
 
 ## AI Chat Completions gateway
 
-The optional `POST /_pmq/ai/chat/completions` endpoint forwards a documented, non-streaming text subset of the OpenAI Chat Completions contract. It uses the app's same origin and existing proxy authentication and write-Origin checks. Provider selection and credentials are server-side; never put provider keys in app JavaScript. The gateway defaults to disabled.
+The optional `POST /_pmq/ai/chat/completions` endpoint implements a documented text subset of the OpenAI Chat Completions contract, including SSE streaming. It uses the app's same origin and existing proxy authentication and write-Origin checks. Provider selection and credentials are server-side; never put provider keys in app JavaScript. The gateway defaults to disabled.
 
-Configure exactly one provider before starting PMQ:
+Configure public aliases and a default before starting PMQ. Multiple providers can be configured together:
 
 ```sh
-# OpenAI
-PMQ_AI_PROVIDER=openai
+# Alias=provider|upstream-model-id
+PMQ_AI_DEFAULT_MODEL=fast
+PMQ_AI_MODELS='fast=openai|gpt-4o-mini,router=openrouter|openai/gpt-4o-mini'
 OPENAI_API_KEY=...
-PMQ_AI_MODELS='fast=gpt-4o-mini'
-
-# Or OpenRouter
-PMQ_AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
-PMQ_AI_MODELS='fast=openai/gpt-4o-mini'
 
-# Or Amazon Bedrock using the AWS SDK credential chain (IAM role, SSO/profile,
-# environment credentials, or workload credentials)
-PMQ_AI_PROVIDER=bedrock
+# Optional Bedrock alias. Add `|stream` only when the selected Bedrock model
+# card lists Chat Completions streaming support.
 AWS_REGION=us-east-1
-PMQ_BEDROCK_MODELS='fast=openai.gpt-oss-20b-1:0'
+PMQ_AI_MODELS="$PMQ_AI_MODELS,aws=bedrock|openai.gpt-oss-20b-1:0"
 ```
 
-`PMQ_AI_MODELS` is a required comma-separated allowlist of `alias=model-id` entries for OpenAI and OpenRouter. Apps send the alias in `model`; PMQ sends the configured model ID upstream. Optional `PMQ_OPENAI_BASE_URL` and `PMQ_OPENROUTER_BASE_URL` allow a trusted compatible endpoint; production URLs must use HTTPS. For Bedrock, `PMQ_BEDROCK_MODELS` is a required comma-separated allowlist of `alias=model-id` or `model-id` entries. Only listed models are sent upstream, and the AWS Chat Completions endpoint may support fewer models than Converse; consult the [Bedrock model card's supported API list](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions.html). PMQ uses the recommended regional `bedrock-runtime` endpoint and standard AWS credential resolution, with no static AWS secrets required. For deployment-specific endpoints, set `PMQ_BEDROCK_BASE_URL`. See the [official OpenAI Go SDK](https://github.com/openai/openai-go) for its maintained provider client and Bedrock SigV4 integration.
+`PMQ_AI_MODELS` is a comma-separated allowlist whose entries are `alias=provider|model-id` or `alias=provider|model-id|stream`. Supported providers are `openai`, `openrouter`, and `bedrock`; only Bedrock requires the `stream` capability marker, and streaming will be rejected for Bedrock aliases without it. `PMQ_AI_DEFAULT_MODEL` must name a configured alias. An app may choose another configured alias in the `model` field; an optional `provider` field must match that alias's configured provider. PMQ never accepts caller-supplied URLs, credentials, or upstream model IDs. Provider keys (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`) and AWS credentials stay server-side. OpenAI and OpenRouter may both be configured. Optional `PMQ_OPENAI_BASE_URL` and `PMQ_OPENROUTER_BASE_URL` set trusted compatible endpoints; production URLs must use HTTPS. Bedrock uses the recommended regional `bedrock-runtime` endpoint and AWS SDK credential chain (IAM roles, SSO/profile, environment, or workload credentials). Select models whose AWS model cards list Chat Completions support, and add `|stream` only where streaming is listed; model discovery is not attempted through Bedrock Runtime `GET /models`. See [Bedrock Chat Completions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions.html) and the [official OpenAI Go SDK](https://github.com/openai/openai-go).
+`PMQ_AI_MODELS` is a comma-separated allowlist whose entries are `alias=provider|model-id` or `alias=provider|model-id|stream`. Supported providers are `openai`, `openrouter`, and `bedrock`; only Bedrock requires the `stream` capability marker, and streaming will be rejected for Bedrock aliases without it. `PMQ_AI_DEFAULT_MODEL` must name a configured alias. An app may choose another configured alias in the `model` field; an optional `provider` field must match that alias's configured provider. PMQ never accepts caller-supplied URLs, credentials, or upstream model IDs. Provider keys (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`) and AWS credentials stay server-side. OpenAI and OpenRouter may both be configured. Optional `PMQ_OPENAI_BASE_URL` and `PMQ_OPENROUTER_BASE_URL` set trusted compatible endpoints; production URLs must use HTTPS. Bedrock uses the recommended regional `bedrock-runtime` endpoint and AWS SDK credential chain (IAM roles, SSO/profile, environment, or workload credentials). For Docker, use a container role or mount the AWS config/credentials files read-only when using a local profile. Select models whose AWS model cards list Chat Completions support, and add `|stream` only where streaming is listed; model discovery is not attempted through Bedrock Runtime `GET /models`. See [Bedrock Chat Completions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions.html) and the [official OpenAI Go SDK](https://github.com/openai/openai-go).
 
 Example request from application JavaScript (same-origin relative URL):
 
@@ -124,12 +120,41 @@ Example request from application JavaScript (same-origin relative URL):
 const response = await fetch('/_pmq/ai/chat/completions', {
   method: 'POST',
   headers: {'Content-Type': 'application/json'},
-  body: JSON.stringify({model: 'fast', messages: [{role: 'user', content: 'Hello'}]}),
+  body: JSON.stringify({messages: [{role: 'user', content: 'Hello'}]}), // uses default alias
 });
 const completion = await response.json();
 ```
 
-Supported fields are `model`, text-only `messages` (`system`, `user`, `assistant`), `temperature`, `top_p`, `max_tokens`, and `stop`. If omitted, `max_tokens` defaults to 1024; values above 32768 are rejected. Streaming, tools, multimodal content, and provider-specific extensions are not supported. Bodies are limited to 1 MiB, upstream responses to 2 MiB, and provider requests time out after 45 seconds. See [AI API details](docs/api.md#ai-chat-completions).
+Override the default with a configured alias: `JSON.stringify({model: 'router', messages: [...]})`. To stream chunks:
+
+```js
+const response = await fetch('/_pmq/ai/chat/completions', {
+  method: 'POST', headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({model: 'fast', stream: true, messages: [{role: 'user', content: 'Hello'}]}),
+});
+if (!response.ok) throw new Error(await response.text());
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let pending = '';
+while (true) {
+  const {value, done} = await reader.read();
+  if (done) break;
+  pending += decoder.decode(value, {stream: true});
+  const events = pending.split('\n\n');
+  pending = events.pop();
+  for (const event of events) {
+    const dataLine = event.split('\n').find(line => line.startsWith('data: '));
+    if (!dataLine) continue;
+    const data = dataLine.slice(6);
+    if (event.startsWith('event: error')) throw new Error(JSON.parse(data).error.message);
+    if (data === '[DONE]') continue;
+    const chunk = JSON.parse(data);
+    document.querySelector('#answer').textContent += chunk.choices?.[0]?.delta?.content || '';
+  }
+}
+```
+
+Supported fields are `model`, optional matching `provider`, text-only `messages` (`system`, `user`, `assistant`), `temperature`, `top_p`, `max_tokens`, `stop`, and `stream`. If omitted, `max_tokens` defaults to 1024; values above 32768 are rejected. Tools, multimodal content, and provider-specific extensions are not supported. Bodies are limited to 1 MiB, upstream responses and streams to 2 MiB, and provider calls time out after 45 seconds. See [AI API details](docs/api.md#ai-chat-completions).
 
 ## Architecture and operations
 

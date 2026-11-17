@@ -110,25 +110,33 @@ func serve(args []string) error {
 		return err
 	}
 	storageConfig := storage.Config{Provider: env("PMQ_STORAGE_PROVIDER", "filesystem"), Endpoint: os.Getenv("PMQ_S3_ENDPOINT"), Region: os.Getenv("PMQ_S3_REGION"), Bucket: os.Getenv("PMQ_S3_BUCKET"), AccessKey: os.Getenv("PMQ_S3_ACCESS_KEY"), SecretKey: os.Getenv("PMQ_S3_SECRET_KEY"), SessionToken: os.Getenv("PMQ_S3_SESSION_TOKEN"), Insecure: insecure, PathStyle: pathStyle}
-	parseModels := func(raw, envName string) (map[string]string, error) {
-		models := make(map[string]string)
+	parseModels := func(raw, envName string) (map[string]pmq.ModelBinding, error) {
+		models := make(map[string]pmq.ModelBinding)
 		for _, entry := range strings.Split(raw, ",") {
 			entry = strings.TrimSpace(entry)
 			if entry == "" {
 				continue
 			}
-			alias, model, found := strings.Cut(entry, "=")
+			alias, value, found := strings.Cut(entry, "=")
 			if !found {
-				alias, model = entry, entry
+				return nil, fmt.Errorf("%s entries must be alias=provider|model-id[|stream]", envName)
 			}
-			if strings.TrimSpace(alias) == "" || strings.TrimSpace(model) == "" {
-				return nil, fmt.Errorf("%s entries must be model-id or alias=model-id", envName)
+			parts := strings.Split(value, "|")
+			if len(parts) < 2 || len(parts) > 3 || strings.TrimSpace(alias) == "" || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+				return nil, fmt.Errorf("%s entries must be alias=provider|model-id[|stream]", envName)
 			}
-			alias, model = strings.TrimSpace(alias), strings.TrimSpace(model)
+			alias, provider, model := strings.TrimSpace(alias), strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+			streaming := false
+			if len(parts) == 3 {
+				if strings.TrimSpace(parts[2]) != "stream" {
+					return nil, fmt.Errorf("%s entry %q has unknown capability %q", envName, alias, parts[2])
+				}
+				streaming = true
+			}
 			if _, exists := models[alias]; exists {
 				return nil, fmt.Errorf("duplicate model alias %q in %s", alias, envName)
 			}
-			models[alias] = model
+			models[alias] = pmq.ModelBinding{Provider: provider, ModelID: model, Streaming: streaming}
 		}
 		return models, nil
 	}
@@ -136,24 +144,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	bedrockModels, err := parseModels(os.Getenv("PMQ_BEDROCK_MODELS"), "PMQ_BEDROCK_MODELS")
-	if err != nil {
-		return err
-	}
-	provider := strings.ToLower(os.Getenv("PMQ_AI_PROVIDER"))
-	aiBaseURL := ""
-	switch provider {
-	case "openai":
-		aiBaseURL = os.Getenv("PMQ_OPENAI_BASE_URL")
-	case "openrouter":
-		aiBaseURL = os.Getenv("PMQ_OPENROUTER_BASE_URL")
-	case "bedrock":
-		aiBaseURL = os.Getenv("PMQ_BEDROCK_BASE_URL")
-	}
-	aiConfig := pmq.AIConfig{Provider: provider, APIKey: os.Getenv("OPENAI_API_KEY"), BaseURL: aiBaseURL, AWSRegion: env("AWS_REGION", os.Getenv("AWS_DEFAULT_REGION")), Models: aiModels, BedrockModels: bedrockModels}
-	if provider == "openrouter" {
-		aiConfig.APIKey = os.Getenv("OPENROUTER_API_KEY")
-	}
+	aiConfig := pmq.AIConfig{Models: aiModels, DefaultModel: os.Getenv("PMQ_AI_DEFAULT_MODEL"), OpenAIKey: os.Getenv("OPENAI_API_KEY"), OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"), AWSRegion: env("AWS_REGION", os.Getenv("AWS_DEFAULT_REGION")), OpenAIBaseURL: os.Getenv("PMQ_OPENAI_BASE_URL"), OpenRouterBaseURL: os.Getenv("PMQ_OPENROUTER_BASE_URL"), BedrockBaseURL: os.Getenv("PMQ_BEDROCK_BASE_URL")}
 	s, err := pmq.New(pmq.Config{Storage: storageConfig, AI: aiConfig, Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
 	if err != nil {
 		return err

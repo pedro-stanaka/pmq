@@ -12,17 +12,17 @@ A document has `id`, `collection`, `data`, `createdAt`, and `updatedAt`. There i
 
 ## AI Chat Completions
 
-When `PMQ_AI_PROVIDER` is configured, `POST /_pmq/ai/chat/completions` accepts a text-only, non-streaming subset of Chat Completions:
+When `PMQ_AI_MODELS` and `PMQ_AI_DEFAULT_MODEL` are configured, `POST /_pmq/ai/chat/completions` accepts a text-only subset of Chat Completions:
 
 ```json
 {"model":"fast","messages":[{"role":"user","content":"Hello"}],"max_tokens":256,"temperature":0.7}
 ```
 
-Allowed fields: `model`, `messages`, `temperature` (0–2), `top_p` (0–1), `max_tokens` (1–32768, default 1024), and `stop`. Message roles are `system`, `user`, or `assistant`, and content must be nonempty text. The normalized response includes the standard completion ID, object, created timestamp, public model alias, choices, and usage. Streaming, tools, multimodal messages, and unknown fields are rejected. Request bodies are capped at 1 MiB, provider responses at 2 MiB, and calls have a 45-second deadline.
+Allowed fields: `model` (a configured alias; omitted selects the default), optional `provider` (must match the alias), `messages`, `temperature` (0–2), `top_p` (0–1), `max_tokens` (1–32768, default 1024), `stop`, and `stream`. Message roles are `system`, `user`, or `assistant`, and content must be nonempty text. The normalized non-streaming response includes the standard completion ID, object, created timestamp, public model alias, choices, and usage. Streaming returns `text/event-stream` with OpenAI-compatible `data: {chunk JSON}` events and a terminal `data: [DONE]`. Chunks expose `choices[].delta.content` and `finish_reason`; a `usage` chunk may be absent, especially if a provider ends the stream early. Provider-specific fields are omitted. Errors before the first chunk use the common JSON error envelope. Errors after streaming starts use `event: error` with a generic error object. Request bodies are capped at 1 MiB, upstream responses and streams at 2 MiB, and calls have a 45-second deadline.
 
-Provider setup is server-only: `PMQ_AI_PROVIDER=openai` uses `OPENAI_API_KEY`; `openrouter` uses `OPENROUTER_API_KEY`; both require a `PMQ_AI_MODELS` allowlist of `alias=model-id` entries. `bedrock` uses the AWS SDK credential chain and requires `PMQ_BEDROCK_MODELS` entries in the same alias format. Only configured models are sent upstream. PMQ uses the regional Bedrock Runtime Chat Completions endpoint; only endpoint-compatible models should be configured. See the README for configuration and examples. No credential or prompt contents are logged.
+Server configuration uses comma-separated `PMQ_AI_MODELS=alias=provider|model-id[|stream]` entries. Providers are `openai`, `openrouter`, or `bedrock`; keys and AWS credentials are server-side. `PMQ_AI_DEFAULT_MODEL` must be one of the aliases. An optional request provider value is accepted only when it matches the selected alias; callers cannot choose upstream URLs, credentials, or model IDs. OpenAI/OpenRouter support streaming; Bedrock aliases support it only when explicitly marked `|stream`. Select Bedrock models whose current model cards support Chat Completions and streaming; PMQ does not call Bedrock Runtime `GET /models`. PMQ uses the regional Bedrock Runtime endpoint and AWS SDK credential chain. See the README for configuration and examples. No credential or prompt contents are logged.
 
-Errors use the common `{"error":{"code":"...","message":"..."}}` contract: invalid requests return 400, an oversized request 413, an unconfigured provider 503, an upstream timeout 504, and other upstream failures 502. The route follows the same per-app hostname, proxy identity, and Origin rules as the document API. Application code should call it through the relative URL `/_pmq/ai/chat/completions`.
+Errors use the common `{"error":{"code":"...","message":"..."}}` contract: invalid requests and model/provider mismatches return 400, an oversized request 413, an unconfigured gateway 503, an unsupported streaming alias 400, an upstream timeout 504, and other upstream failures 502. The route follows the same per-app hostname, proxy identity, and Origin rules as the document API. Application code should call it through the relative URL `/_pmq/ai/chat/completions`.
 
 ## Object storage
 
