@@ -1,0 +1,90 @@
+# Shared Caddy Security SSO integration for PMQ.
+# Merge the security declarations into the existing global `security` block
+# and reuse the existing portal/provider where possible; do not duplicate them.
+# Required env: PMQ_DOMAIN, PMQ_UPSTREAM, PMQ_OPERATOR_CIDRS,
+# PMQ_COOKIE_DOMAIN, PMQ_ALLOWED_EMAIL, PMQ_SSO_SIGNING_KEY,
+# GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, CLOUDFLARE_API_TOKEN.
+
+{
+	security {
+		# If Google is already configured, reuse that provider declaration.
+		oauth identity provider google {
+			realm google
+			driver google
+			client_id {env.GOOGLE_CLIENT_ID}
+			client_secret {env.GOOGLE_CLIENT_SECRET}
+			scopes openid email profile
+		}
+
+		# If an auth portal already exists, merge the cookie and transform
+		# settings into it and retain its configured signing key.
+		authentication portal pmq_portal {
+			crypto default token lifetime 3600
+			crypto key sign-verify {env.PMQ_SSO_SIGNING_KEY}
+			enable identity provider google
+			cookie domain {$PMQ_COOKIE_DOMAIN}
+			cookie lifetime 3600
+			cookie same site lax
+			cookie insecure disabled
+			cookie prefix PMQ
+			trust login redirect uri domain suffix {$PMQ_DOMAIN} path prefix /
+			transform user {
+				match realm google
+				match email {$PMQ_ALLOWED_EMAIL}
+				action add role pmq/app-user
+			}
+		}
+
+		authorization policy pmq_apps {
+			set auth url https://sso.{$PMQ_DOMAIN}/
+			crypto key verify {env.PMQ_SSO_SIGNING_KEY}
+			set session_id cookie name PMQ_SESSION_ID
+			set access_token cookie name PMQ_ACCESS_TOKEN
+			set token sources cookie
+			allow roles pmq/app-user
+			inject header "X-PMQ-User" from email
+		}
+	}
+}
+
+# Shared SSO portal host. Add this site to the existing Caddyfile.
+sso.{$PMQ_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	route {
+		authenticate with pmq_portal
+	}
+}
+
+# Wildcard app host: authorization runs before every request reaches PMQ.
+*.{$PMQ_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	route {
+		@admin path /_pmq/admin /_pmq/admin/*
+		respond @admin "Not Found" 404
+
+		# Defense in depth. The policy also clears this destination header
+		# before auth and injects it only after a valid token is authorized.
+		request_header -X-PMQ-User
+		authorize with pmq_apps
+		reverse_proxy {$PMQ_UPSTREAM}
+	}
+}
+
+# Private operator hostname: no app SSO bypasses the PMQ bearer-token check.
+pmq-admin.{$PMQ_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	route {
+		@notAdmin not path /_pmq/admin /_pmq/admin/*
+		respond @notAdmin "Not Found" 404
+		@operator remote_ip {$PMQ_OPERATOR_CIDRS}
+		request_header -X-PMQ-User
+		reverse_proxy @operator {$PMQ_UPSTREAM}
+		respond "Forbidden" 403
+	}
+}

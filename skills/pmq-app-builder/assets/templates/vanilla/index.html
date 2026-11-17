@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f6f8">
+    <title>PMQ Task List</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">A small PMQ example</p>
+        <h1>Task list</h1>
+        <p>Tasks are stored for this app and shared with its trusted users.</p>
+      </header>
+      <form id="task-form">
+        <label for="task-text">New task</label>
+        <div class="form-row">
+          <input id="task-text" name="text" maxlength="200" required autocomplete="off">
+          <button type="submit">Add task</button>
+        </div>
+      </form>
+      <p id="status" role="status" aria-live="polite">Loading tasks…</p>
+      <ul id="tasks" aria-label="Tasks"></ul>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "pmq-browser-sdk-workspace",
+  "private": true,
+  "workspaces": ["sdk", "examples/vite"],
+  "scripts": {
+    "build": "npm run build --workspace @pmq-dev/client",
+    "test": "npm run test --workspace @pmq-dev/client"
+  }
+}

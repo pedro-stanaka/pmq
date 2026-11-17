@@ -1,0 +1,59 @@
+services:
+  pmq:
+    # Build and publish the repository Dockerfile separately; pin a tested digest.
+    image: ${PMQ_IMAGE:?Set PMQ_IMAGE to a tested image digest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PMQ_DOMAIN: ${PMQ_DOMAIN:?Set PMQ_DOMAIN}
+      PMQ_DEPLOY_TOKEN: ${PMQ_DEPLOY_TOKEN:?Set PMQ_DEPLOY_TOKEN from a secret}
+      PMQ_TRUSTED_PROXIES: ${PMQ_TRUSTED_PROXIES:?Set to the observed Caddy peer}
+      PMQ_IDENTITY_HEADER: ${PMQ_IDENTITY_HEADER:-X-PMQ-User}
+      PMQ_STORAGE_PROVIDER: ${PMQ_STORAGE_PROVIDER:-filesystem}
+      PMQ_S3_ENDPOINT: ${PMQ_S3_ENDPOINT:-}
+      PMQ_S3_REGION: ${PMQ_S3_REGION:-}
+      PMQ_S3_BUCKET: ${PMQ_S3_BUCKET:-}
+      PMQ_S3_ACCESS_KEY: ${PMQ_S3_ACCESS_KEY:-}
+      PMQ_S3_SECRET_KEY: ${PMQ_S3_SECRET_KEY:-}
+      PMQ_S3_SESSION_TOKEN: ${PMQ_S3_SESSION_TOKEN:-}
+      PMQ_S3_INSECURE: ${PMQ_S3_INSECURE:-false}
+      PMQ_S3_PATH_STYLE: ${PMQ_S3_PATH_STYLE:-false}
+      PMQ_AI_MODELS: ${PMQ_AI_MODELS:-}
+      PMQ_AI_DEFAULT_MODEL: ${PMQ_AI_DEFAULT_MODEL:-}
+      PMQ_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${PMQ_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+      PMQ_AI_GLOBAL_RPM: ${PMQ_AI_GLOBAL_RPM:-120}
+      PMQ_AI_PER_APP_RPM: ${PMQ_AI_PER_APP_RPM:-30}
+      PMQ_AI_GLOBAL_CONCURRENCY: ${PMQ_AI_GLOBAL_CONCURRENCY:-16}
+      PMQ_AI_PER_APP_CONCURRENCY: ${PMQ_AI_PER_APP_CONCURRENCY:-4}
+      PMQ_AI_MAX_REQUEST_BYTES: ${PMQ_AI_MAX_REQUEST_BYTES:-1048576}
+      PMQ_AI_MAX_RESPONSE_BYTES: ${PMQ_AI_MAX_RESPONSE_BYTES:-2097152}
+      PMQ_AI_MAX_OUTPUT_TOKENS: ${PMQ_AI_MAX_OUTPUT_TOKENS:-32768}
+      PMQ_AI_DEFAULT_OUTPUT_TOKENS: ${PMQ_AI_DEFAULT_OUTPUT_TOKENS:-1024}
+      PMQ_AI_TIMEOUT: ${PMQ_AI_TIMEOUT:-45s}
+      PMQ_AI_GLOBAL_BUDGET_USD: ${PMQ_AI_GLOBAL_BUDGET_USD:-0}
+      PMQ_AI_PER_APP_BUDGET_USD: ${PMQ_AI_PER_APP_BUDGET_USD:-0}
+      PMQ_AI_PRICING: ${PMQ_AI_PRICING:-}
+      PMQ_OPENAI_BASE_URL: ${PMQ_OPENAI_BASE_URL:-}
+      PMQ_OPENROUTER_BASE_URL: ${PMQ_OPENROUTER_BASE_URL:-}
+      PMQ_BEDROCK_BASE_URL: ${PMQ_BEDROCK_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      AWS_REGION: ${AWS_REGION:-}
+    volumes:
+      - pmq-data:/data
+    stop_grace_period: 15s
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8080/_pmq/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+volumes:
+  pmq-data:

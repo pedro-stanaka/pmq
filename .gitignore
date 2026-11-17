@@ -3,3 +3,8 @@
 .env
 
 /.local/
+/node_modules/
+/sdk/dist/
+/examples/vite/dist/
+**/node_modules/
+/skills/pmq-app-builder/assets/templates/react-vite-ts/dist/
