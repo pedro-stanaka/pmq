@@ -8,7 +8,9 @@ server_pid=$!
 trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; rm -f "${TMPDIR:-/tmp}/pmq-moto-$$.log"' EXIT
 
 for attempt in {1..50}; do
-  if curl --silent --fail "http://127.0.0.1:$port/" >/dev/null; then
+  if grep -q "Running on http://127.0.0.1:$port" "${TMPDIR:-/tmp}/pmq-moto-$$.log" && \
+    kill -0 "$server_pid" 2>/dev/null && \
+    curl --silent --fail "http://127.0.0.1:$port/" >/dev/null; then
     break
   fi
   if ! kill -0 "$server_pid" 2>/dev/null; then
