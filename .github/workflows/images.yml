@@ -3,12 +3,15 @@ name: Images
 # Multi-arch (linux/amd64, linux/arm64) OCI images to GHCR.
 # Tag policy (docs/distribution.md): vX.Y.Z and vX.Y are immutable release
 # tags, `latest` tracks the newest tagged release, `edge` tracks main.
-# PRs build without pushing.
+# Pull requests intentionally do NOT build images: the QEMU arm64 build
+# makes every PR wait ~15-20 minutes for information `make check` already
+# provides. The same Dockerfile is exercised by the arch-package job's
+# containerized build; images are built only when they are published —
+# on tags (release) and on main (`edge` flavor).
 on:
   push:
     branches: [main]
     tags: ['v*']
-  pull_request:
 
 permissions:
   contents: read
