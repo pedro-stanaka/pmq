@@ -18,7 +18,9 @@ runner=$(command -v docker || command -v podman)
 [ -n "$runner" ] || { echo "docker or podman required" >&2; exit 2; }
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# The Arch container writes as its own uid; it relaxes permissions in its
+# own EXIT trap so the host user (CI runners use a different uid) can clean up.
+trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 git archive --format=tar.gz --prefix="pmq-$pkgver/" -o "$work/pmq-$pkgver.tar.gz" HEAD
 
 "$runner" run --rm -i \
@@ -27,6 +29,7 @@ git archive --format=tar.gz --prefix="pmq-$pkgver/" -o "$work/pmq-$pkgver.tar.gz
   archlinux:base-devel \
   bash -euo pipefail -s -- "$pkgver" <<'EOF'
 pkgver="$1"
+trap 'chmod -R a+rwX /work 2>/dev/null || true' EXIT
 pacman -Syu --noconfirm --needed pacman-contrib sudo >/dev/null
 useradd -m builder
 echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
