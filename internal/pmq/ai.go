@@ -576,8 +576,11 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 		s.aiStream(w, ctx, json.RawMessage(b), reservation, alias, provider, metricAlias, startedAt, span)
 		return
 	}
-	response, err := s.aiProvider.Complete(ctx, json.RawMessage(b))
+	providerCtx, providerSpan := s.startAIProviderSpan(ctx, provider, metricAlias, false)
+	response, err := s.aiProvider.Complete(providerCtx, json.RawMessage(b))
 	if err != nil {
+		providerSpan.SetStatus(codes.Error, boundedAIError(err, ctx))
+		providerSpan.End()
 		s.recordAIResult(provider, metricAlias, startedAt, err, ctx)
 		span.SetStatus(codes.Error, boundedAIError(err, ctx))
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
@@ -589,6 +592,8 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 	}
 	var completion ChatResponse
 	if err := json.Unmarshal(response, &completion); err != nil {
+		providerSpan.SetStatus(codes.Error, "provider")
+		providerSpan.End()
 		s.recordAIResult(provider, metricAlias, startedAt, err, ctx)
 		span.SetStatus(codes.Error, "provider")
 		cost, usageStatus := s.aiAdmission.finish(reservation, nil)
@@ -604,6 +609,7 @@ func (s *Server) ai(w http.ResponseWriter, r *http.Request, app string) {
 		completion.Usage = nil
 		response, _ = json.Marshal(completion)
 	}
+	providerSpan.End()
 	s.recordAIResult(provider, metricAlias, startedAt, nil, ctx)
 	if validChatUsage(usage) {
 		s.recordAIUsage(provider, metricAlias, usage)
@@ -629,6 +635,7 @@ func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.
 		fail(w, 501, "streaming_unsupported", "Configured provider does not support streaming")
 		return
 	}
+	providerCtx, providerSpan := s.startAIProviderSpan(ctx, provider, metricAlias, true)
 	started := false
 	firstToken := true
 	emit := func(chunk json.RawMessage) error {
@@ -656,7 +663,11 @@ func (s *Server) aiStream(w http.ResponseWriter, ctx context.Context, body json.
 		}
 		return nil
 	}
-	usage, err := streamer.Stream(ctx, body, emit)
+	usage, err := streamer.Stream(providerCtx, body, emit)
+	if err != nil {
+		providerSpan.SetStatus(codes.Error, boundedAIError(err, ctx))
+	}
+	providerSpan.End()
 	if usage != nil && !validChatUsage(usage) {
 		usage = nil
 	}

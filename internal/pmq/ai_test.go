@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"io"
 	"net/http"
@@ -342,43 +343,108 @@ func (c *capturedSpans) ExportSpans(_ context.Context, spans []sdktrace.ReadOnly
 func (c *capturedSpans) Shutdown(context.Context) error { return nil }
 
 func TestAITraceSpanContainsOnlySafeAttributes(t *testing.T) {
-	provider := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(chatResponse), nil
-	})
-	cfg := AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: "openai", ModelID: "private-model"}}}
-	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: provider})
+	for _, tc := range []struct {
+		name   string
+		stream bool
+	}{{"completion", false}, {"stream", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+				return json.RawMessage(chatResponse), nil
+			})
+			var provider ChatProvider = base
+			if tc.stream {
+				provider = usageStreamProvider{base}
+			}
+			cfg := AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: "openai", ModelID: "private-model"}}}
+			s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg, AIProvider: provider})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			upload(t, s, "private-app", "app")
+			captured := &capturedSpans{}
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(captured))
+			defer tp.Shutdown(context.Background())
+			s.aiTracer = tp.Tracer("test")
+			body := `{"model":"alias","messages":[{"role":"user","content":"prompt-secret"}]}`
+			if tc.stream {
+				body = `{"model":"alias","stream":true,"messages":[{"role":"user","content":"prompt-secret"}]}`
+			}
+			if w := req(s, http.MethodPost, "private-app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(body), true); w.Code != 200 {
+				t.Fatalf("status %d: %s", w.Code, w.Body)
+			}
+			if err := tp.ForceFlush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(captured.spans) != 2 {
+				t.Fatalf("captured %d spans", len(captured.spans))
+			}
+			var parent, child sdktrace.ReadOnlySpan
+			for _, span := range captured.spans {
+				switch span.Name() {
+				case "pmq.ai.request":
+					parent = span
+				case "pmq.ai.provider_call":
+					child = span
+				}
+			}
+			if parent == nil || child == nil {
+				t.Fatalf("missing request/provider spans: %#v", captured.spans)
+			}
+			if child.Parent().SpanID() != parent.SpanContext().SpanID() || child.SpanContext().TraceID() != parent.SpanContext().TraceID() {
+				t.Fatalf("provider span is not a child of request span: parent=%v child-parent=%v", parent.SpanContext(), child.Parent())
+			}
+			for _, span := range []sdktrace.ReadOnlySpan{parent, child} {
+				joined := span.Name()
+				for _, a := range span.Attributes() {
+					joined += string(a.Key) + a.Value.Emit()
+				}
+				for _, secret := range []string{"prompt-secret", "private-app", "private-model", "alice", "secret"} {
+					if strings.Contains(joined, secret) {
+						t.Errorf("span leaked %q: %s", secret, joined)
+					}
+				}
+				if !strings.Contains(joined, "openai") || !strings.Contains(joined, "alias") {
+					t.Errorf("safe provider or alias missing: %s", joined)
+				}
+			}
+		})
+	}
+}
+
+func TestAIProviderChildSpanUsesBoundedErrorDescription(t *testing.T) {
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: AIConfig{DefaultModel: "alias", Models: map[string]ModelBinding{"alias": {Provider: "openrouter", ModelID: "private-model"}}}, AIProvider: chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return nil, errors.New("secret prompt and credential")
+	})})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	upload(t, s, "private-app", "app")
+	upload(t, s, "app", "app")
 	captured := &capturedSpans{}
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(captured))
 	defer tp.Shutdown(context.Background())
 	s.aiTracer = tp.Tracer("test")
-	req(s, http.MethodPost, "private-app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"alias","messages":[{"role":"user","content":"prompt-secret"}]}`), true)
+	req(s, http.MethodPost, "app.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"private prompt"}]}`), true)
 	if err := tp.ForceFlush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(captured.spans) != 1 {
-		t.Fatalf("captured %d spans", len(captured.spans))
-	}
-	span := captured.spans[0]
-	if span.Name() != "pmq.ai.request" {
-		t.Fatalf("span name %q", span.Name())
-	}
-	attrs := span.Attributes()
-	joined := span.Name()
-	for _, a := range attrs {
-		joined += string(a.Key) + a.Value.Emit()
-	}
-	for _, secret := range []string{"prompt-secret", "private-app", "private-model", "alice", "secret"} {
-		if strings.Contains(joined, secret) {
-			t.Errorf("span leaked %q: %s", secret, joined)
+	var child sdktrace.ReadOnlySpan
+	for _, span := range captured.spans {
+		if span.Name() == "pmq.ai.provider_call" {
+			child = span
 		}
 	}
-	if !strings.Contains(joined, "openai") || !strings.Contains(joined, "alias") {
-		t.Fatalf("safe provider or alias missing: %s", joined)
+	if child == nil {
+		t.Fatal("provider child span missing")
+	}
+	if child.Status().Code != codes.Error || child.Status().Description != "provider" {
+		t.Fatalf("provider error status was not bounded: %+v", child.Status())
+	}
+	for _, a := range child.Attributes() {
+		if strings.Contains(a.Value.Emit(), "private") || strings.Contains(a.Value.Emit(), "credential") {
+			t.Errorf("unsafe provider span attribute %s=%s", a.Key, a.Value.Emit())
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -108,6 +109,14 @@ func (s *Server) recordAIResult(provider, alias string, started time.Time, err e
 	}
 	s.aiMetrics.requests.WithLabelValues(provider, alias, outcome, category).Inc()
 	s.aiMetrics.duration.WithLabelValues(provider, alias, outcome).Observe(time.Since(started).Seconds())
+}
+
+func (s *Server) startAIProviderSpan(ctx context.Context, provider, alias string, streaming bool) (context.Context, trace.Span) {
+	return s.aiTracer.Start(ctx, "pmq.ai.provider_call", trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
+		attribute.String("pmq.ai.provider", provider),
+		attribute.String("pmq.ai.model_alias", alias),
+		attribute.Bool("pmq.ai.stream", streaming),
+	))
 }
 
 func (s *Server) recordAIUsage(provider, alias string, usage *ChatUsage) {
