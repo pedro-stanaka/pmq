@@ -1,0 +1,37 @@
+# Maintainer: Pedro Tanaka (github.com/pedro-stanaka)
+# Source package for a future AUR `pmq` entry; do not publish to AUR without
+# explicit authorization. See packaging/arch/update.sh for version bumps.
+
+pkgname=pmq
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Poor Man'"'"'s Quick: self-hosted static app hosting with per-app JSON documents, object storage and an OpenAI-compatible AI gateway'
+arch=('x86_64' 'aarch64')
+url='https://github.com/pedro-stanaka/pmq'
+license=('MIT')
+makedepends=('go')
+# Avoid producing a useless pmq-debug split package from the stripped binary.
+options=(!debug)
+# Built from the pinned tagged source archive with the Go toolchain; no
+# prebuilt binary. update.sh fills in the checksum after the tag is published.
+source=("$pkgname-$pkgver.tar.gz::https://github.com/pedro-stanaka/pmq/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CGO_ENABLED=0 GOFLAGS=-buildvcs=false
+  go build -trimpath -ldflags="-s -w -X main.version=$pkgver" -o build/pmq ./cmd/pmq
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export CGO_ENABLED=0 GOFLAGS=-buildvcs=false
+  go test ./...
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 build/pmq "$pkgdir/usr/bin/pmq"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
