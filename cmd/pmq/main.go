@@ -39,7 +39,7 @@ Usage: pmq <command> [flags]
 
 Commands:
   serve     Run the PMQ server (see 'pmq serve --help' for flags)
-  deploy    Upload a built static app directory to the server
+  deploy    Upload a built static app directory or .zip archive
   list      List deployed apps
   status    Show an app's active release
   releases  List an app's releases
@@ -336,7 +336,7 @@ func check(resp *http.Response) error {
 }
 func deploy(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pmq deploy DIRECTORY --name NAME")
+		return errors.New("usage: pmq deploy DIRECTORY|APP.zip --name NAME")
 	}
 	dir := args[0]
 	f := flag.NewFlagSet("deploy", flag.ContinueOnError)
@@ -353,7 +353,39 @@ func deploy(args []string) error {
 		return err
 	}
 	st, err := os.Lstat(root)
-	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+	if err != nil {
+		return err
+	}
+	if st.Mode().IsRegular() {
+		// A .zip archive is uploaded as-is; the server unpacks and validates it
+		// with the same rules the CLI applies when packing a directory.
+		if !strings.EqualFold(filepath.Ext(root), ".zip") {
+			return errors.New("deployment path must be a directory or a .zip archive")
+		}
+		if st.Size() > pmq.MaxUpload {
+			return errors.New("deployment too large")
+		}
+		file, e := os.Open(root)
+		if e != nil {
+			return e
+		}
+		defer file.Close()
+		resp, e := request("POST", *server, "/_pmq/admin/deploy/"+*name, *token, file)
+		if e != nil {
+			return e
+		}
+		defer resp.Body.Close()
+		if e = check(resp); e != nil {
+			return e
+		}
+		b, e := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if e != nil {
+			return e
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return errors.New("deployment path must be a directory, not a symlink")
 	}
 	tmp, err := os.CreateTemp("", "pmq-upload-*")
