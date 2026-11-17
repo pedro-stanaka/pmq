@@ -137,3 +137,5 @@ A validated hostname selects an app; its active immutable release serves files, 
 This is a single-node system for a fully trusted group, not a security sandbox. App JavaScript runs in users' browsers; all users of an app share its data. Hostname isolation relies on DNS and browser origin rules. Back up data, restrict deployment access, and keep the proxy and host patched. OAuth, account registration, server-side code execution, distributed operation, and arbitrary SQL are not part of this slice.
 
 For private LAN/tailnet ingress, split DNS, and reachability checks, see [private ingress](docs/proxy/private-ingress.md).
+
+For the optional production Compose/Komodo recipe and offline backup/restore drill, see [production and recovery](docs/proxy/production.md).
