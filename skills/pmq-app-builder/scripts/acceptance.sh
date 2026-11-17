@@ -3,6 +3,7 @@ set -euo pipefail
 
 skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo_root="$(cd "$skill_dir/../.." && pwd)"
+cd "$repo_root"
 tmp="$(mktemp -d)"
 token="pmq-skill-acceptance-token"
 app="skill-acceptance"
