@@ -144,13 +144,17 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	aiConfig := pmq.AIConfig{Models: aiModels, DefaultModel: os.Getenv("PMQ_AI_DEFAULT_MODEL"), OpenAIKey: os.Getenv("OPENAI_API_KEY"), OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"), AWSRegion: env("AWS_REGION", os.Getenv("AWS_DEFAULT_REGION")), OpenAIBaseURL: os.Getenv("PMQ_OPENAI_BASE_URL"), OpenRouterBaseURL: os.Getenv("PMQ_OPENROUTER_BASE_URL"), BedrockBaseURL: os.Getenv("PMQ_BEDROCK_BASE_URL")}
+	aiLimits, err := aiLimitsFromEnv()
+	if err != nil {
+		return err
+	}
+	aiConfig := pmq.AIConfig{Models: aiModels, DefaultModel: os.Getenv("PMQ_AI_DEFAULT_MODEL"), OpenAIKey: os.Getenv("OPENAI_API_KEY"), OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"), AWSRegion: env("AWS_REGION", os.Getenv("AWS_DEFAULT_REGION")), OpenAIBaseURL: os.Getenv("PMQ_OPENAI_BASE_URL"), OpenRouterBaseURL: os.Getenv("PMQ_OPENROUTER_BASE_URL"), BedrockBaseURL: os.Getenv("PMQ_BEDROCK_BASE_URL"), Limits: aiLimits}
 	s, err := pmq.New(pmq.Config{Storage: storageConfig, AI: aiConfig, Listen: *listen, DataDir: *data, Domain: *domain, Dev: *dev, Token: *token, IdentityHeader: *header, TrustedProxies: ps})
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: aiServerWriteTimeout(aiLimits.Timeout), IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
@@ -189,6 +193,95 @@ func storageBool(name string) (bool, error) {
 	}
 	return b, nil
 }
+
+func aiLimitsFromEnv() (pmq.AILimits, error) {
+	integer := func(name string) (int, error) {
+		value := os.Getenv(name)
+		if value == "" {
+			return 0, nil
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("%s must be a non-negative integer", name)
+		}
+		return n, nil
+	}
+	int64Value := func(name string) (int64, error) {
+		value := os.Getenv(name)
+		if value == "" {
+			return 0, nil
+		}
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("%s must be a non-negative integer", name)
+		}
+		return n, nil
+	}
+	amount := func(name string) (float64, error) {
+		value := os.Getenv(name)
+		if value == "" {
+			return 0, nil
+		}
+		n, err := strconv.ParseFloat(value, 64)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("%s must be a non-negative amount", name)
+		}
+		return n, nil
+	}
+	var l pmq.AILimits
+	var err error
+	if l.GlobalRPM, err = integer("PMQ_AI_GLOBAL_RPM"); err != nil {
+		return l, err
+	}
+	if l.PerAppRPM, err = integer("PMQ_AI_PER_APP_RPM"); err != nil {
+		return l, err
+	}
+	if l.GlobalConcurrency, err = integer("PMQ_AI_GLOBAL_CONCURRENCY"); err != nil {
+		return l, err
+	}
+	if l.PerAppConcurrency, err = integer("PMQ_AI_PER_APP_CONCURRENCY"); err != nil {
+		return l, err
+	}
+	if l.MaxOutputTokens, err = integer("PMQ_AI_MAX_OUTPUT_TOKENS"); err != nil {
+		return l, err
+	}
+	if l.DefaultOutputTokens, err = integer("PMQ_AI_DEFAULT_OUTPUT_TOKENS"); err != nil {
+		return l, err
+	}
+	if l.MaxRequestBytes, err = int64Value("PMQ_AI_MAX_REQUEST_BYTES"); err != nil {
+		return l, err
+	}
+	if l.MaxResponseBytes, err = int64Value("PMQ_AI_MAX_RESPONSE_BYTES"); err != nil {
+		return l, err
+	}
+	if l.GlobalBudgetUSD, err = amount("PMQ_AI_GLOBAL_BUDGET_USD"); err != nil {
+		return l, err
+	}
+	if l.PerAppBudgetUSD, err = amount("PMQ_AI_PER_APP_BUDGET_USD"); err != nil {
+		return l, err
+	}
+	if value := os.Getenv("PMQ_AI_TIMEOUT"); value != "" {
+		l.Timeout, err = time.ParseDuration(value)
+		if err != nil || l.Timeout <= 0 {
+			return l, errors.New("PMQ_AI_TIMEOUT must be a positive duration such as 45s")
+		}
+	}
+	if value := os.Getenv("PMQ_AI_PRICING"); value != "" {
+		if err := json.Unmarshal([]byte(value), &l.Pricing); err != nil {
+			return l, fmt.Errorf("PMQ_AI_PRICING must be a JSON object: %w", err)
+		}
+	}
+	return l, nil
+}
+
+func aiServerWriteTimeout(aiTimeout time.Duration) time.Duration {
+	if aiTimeout <= 0 {
+		aiTimeout = 45 * time.Second
+	}
+	// Leave time to serialize an error/final accounting event after provider timeout.
+	return aiTimeout + 15*time.Second
+}
+
 func clientFlags(f *flag.FlagSet) (*string, *string) {
 	return f.String("server", env("PMQ_SERVER", "http://127.0.0.1:8080"), "server URL"), f.String("token", env("PMQ_DEPLOY_TOKEN", ""), "deployment token")
 }

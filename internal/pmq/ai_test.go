@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,8 +22,17 @@ func (f chatProviderFunc) Complete(ctx context.Context, b json.RawMessage) (json
 
 type streamChatProvider struct{ chatProviderFunc }
 
-func (p streamChatProvider) Stream(ctx context.Context, _ json.RawMessage, emit func(json.RawMessage) error) error {
-	return emit(json.RawMessage(`{"id":"chunk","object":"chat.completion.chunk","created":1,"model":"fast","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`))
+func (p streamChatProvider) Stream(ctx context.Context, _ json.RawMessage, emit func(json.RawMessage) error) (*ChatUsage, error) {
+	return nil, emit(json.RawMessage(`{"id":"chunk","object":"chat.completion.chunk","created":1,"model":"fast","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`))
+}
+
+type failingStreamChatProvider struct{ chatProviderFunc }
+
+func (p failingStreamChatProvider) Stream(_ context.Context, _ json.RawMessage, emit func(json.RawMessage) error) (*ChatUsage, error) {
+	if err := emit(json.RawMessage(`{"id":"chunk","object":"chat.completion.chunk","created":1,"model":"fast","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`)); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("provider failed")
 }
 
 const chatResponse = `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"provider_secret":"never forward"}`
@@ -63,7 +73,7 @@ func TestAIHTTPStreamingFrames(t *testing.T) {
 	})}
 	s := aiFixture(t, p)
 	w := req(s, http.MethodPost, "chat.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}],"stream":true}`), true)
-	if w.Code != 200 || w.Header().Get("Content-Type") != "text/event-stream" || !w.Flushed || !strings.Contains(w.Body.String(), `data: {"id":"chunk"`) || !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
+	if w.Code != 200 || w.Header().Get("Content-Type") != "text/event-stream" || !w.Flushed || !strings.Contains(w.Body.String(), `data: {"id":"chunk"`) || !strings.Contains(w.Body.String(), "event: pmq-usage\ndata: {\"status\":\"unavailable\"}") || !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
 		t.Fatalf("unexpected SSE response: status=%d headers=%v body=%q", w.Code, w.Header(), w.Body.String())
 	}
 }
@@ -132,7 +142,7 @@ func TestAIErrorsAndValidation(t *testing.T) {
 		}
 	}
 	w := req(s, http.MethodPost, "chat.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`), true)
-	if w.Code != 502 || strings.Contains(w.Body.String(), "secret provider error") {
+	if w.Code != 502 || w.Header().Get("X-PMQ-Usage-Status") != "unavailable" || strings.Contains(w.Body.String(), "secret provider error") {
 		t.Fatalf("provider error leaked: %d %s", w.Code, w.Body)
 	}
 	if w := req(s, http.MethodGet, "chat.apps.localhost", "/_pmq/ai/chat/completions", nil, true); w.Code != 405 {
@@ -258,6 +268,7 @@ func TestStreamingProviders(t *testing.T) {
 				}
 				_, _ = io.WriteString(w, "data: {\"id\":\"chunk-2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"upstream\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
 				_, _ = io.WriteString(w, "data: {\"id\":\"chunk-3\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"upstream\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+				_, _ = io.WriteString(w, "data: {\"id\":\"usage\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"upstream\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n")
 				_, _ = io.WriteString(w, "data: [DONE]\n\n")
 			}))
 			defer ts.Close()
@@ -276,15 +287,21 @@ func TestStreamingProviders(t *testing.T) {
 			}
 			streamer := p.(StreamingChatProvider)
 			var events []json.RawMessage
-			err = streamer.Stream(context.Background(), json.RawMessage(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`), func(b json.RawMessage) error {
+			usage, streamErr := streamer.Stream(context.Background(), json.RawMessage(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`), func(b json.RawMessage) error {
 				events = append(events, append(json.RawMessage(nil), b...))
 				return nil
 			})
-			if err != nil {
-				t.Fatal(err)
+			if streamErr != nil {
+				t.Fatal(streamErr)
 			}
-			if len(events) != 3 || !strings.Contains(string(events[1]), `"content":"hello"`) || !strings.Contains(string(events[1]), `"model":"friendly"`) {
+			if usage == nil || !validChatUsage(usage) || usage.PromptTokens != 2 || usage.CompletionTokens != 1 {
+				t.Fatalf("stream usage was not normalized: %+v", usage)
+			}
+			if len(events) != 4 || !strings.Contains(string(events[1]), `"content":"hello"`) || !strings.Contains(string(events[1]), `"model":"friendly"`) {
 				t.Fatalf("unexpected stream: %s", events)
+			}
+			if usage == nil || !validChatUsage(usage) || usage.PromptTokens != 2 || usage.CompletionTokens != 1 {
+				t.Fatalf("stream usage not captured: %+v", usage)
 			}
 			if !strings.Contains(upstreamBody, `"model":"upstream"`) || !strings.Contains(upstreamBody, `"stream":true`) || !strings.Contains(upstreamBody, `"max_tokens":1024`) {
 				t.Fatalf("unexpected request: %s", upstreamBody)
@@ -307,10 +324,209 @@ func TestBedrockStreamingRequiresConfiguredCapability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = p.(StreamingChatProvider).Stream(context.Background(), json.RawMessage(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`), func(json.RawMessage) error { return nil })
+	_, err = p.(StreamingChatProvider).Stream(context.Background(), json.RawMessage(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`), func(json.RawMessage) error { return nil })
 	var ae *aiError
 	if !errors.As(err, &ae) || ae.code != "streaming_unsupported" || calls != 0 {
 		t.Fatalf("unexpected capability result err=%v calls=%d", err, calls)
+	}
+}
+
+func TestUsageMetadataDoesNotInventMissingTokens(t *testing.T) {
+	var absent ChatResponse
+	if err := json.Unmarshal([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), &absent); err != nil {
+		t.Fatal(err)
+	}
+	if absent.Usage != nil {
+		t.Fatalf("missing usage became a value: %+v", absent.Usage)
+	}
+	var partial ChatResponse
+	if err := json.Unmarshal([]byte(`{"usage":{"prompt_tokens":2,"total_tokens":2}}`), &partial); err != nil {
+		t.Fatal(err)
+	}
+	if validChatUsage(partial.Usage) {
+		t.Fatalf("partial provider usage treated as complete: %+v", partial.Usage)
+	}
+	var reported ChatResponse
+	if err := json.Unmarshal([]byte(`{"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`), &reported); err != nil {
+		t.Fatal(err)
+	}
+	if !validChatUsage(reported.Usage) {
+		t.Fatalf("complete usage not accepted: %+v", reported.Usage)
+	}
+}
+
+func TestProviderBudgetsRejectBeforeUpstream(t *testing.T) {
+	for _, provider := range []string{"openai", "openrouter", "bedrock"} {
+		t.Run(provider, func(t *testing.T) {
+			if provider == "bedrock" {
+				t.Setenv("AWS_ACCESS_KEY_ID", "test-access")
+				t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+				t.Setenv("AWS_REGION", "us-east-1")
+			}
+			calls := 0
+			includeUsage := atomic.Bool{}
+			path := "/v1/chat/completions"
+			if provider == "bedrock" {
+				path = "/openai/v1/chat/completions"
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path != path {
+					t.Errorf("unexpected upstream route %q", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if includeUsage.Load() {
+					_, _ = io.WriteString(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`)
+				} else {
+					_, _ = io.WriteString(w, chatResponse)
+				}
+			}))
+			defer upstream.Close()
+			limits := AILimits{GlobalRPM: 100, PerAppRPM: 100, GlobalConcurrency: 8, PerAppConcurrency: 4, DefaultOutputTokens: 1, MaxOutputTokens: 10, GlobalBudgetUSD: 0.00002, PerAppBudgetUSD: 0.00001,
+				Pricing: map[string]AIPrice{"fast": {InputUSDPerMillion: 1, OutputUSDPerMillion: 1, Provenance: "mock fixture rate"}}}
+			cfg := AIConfig{DefaultModel: "fast", Limits: limits, Models: map[string]ModelBinding{"fast": {Provider: provider, ModelID: "upstream-model", Streaming: true}}}
+			switch provider {
+			case "openai":
+				cfg.OpenAIKey, cfg.OpenAIBaseURL = "test-key", upstream.URL+"/v1"
+			case "openrouter":
+				cfg.OpenRouterKey, cfg.OpenRouterBaseURL = "test-key", upstream.URL+"/v1"
+			case "bedrock":
+				cfg.AWSRegion, cfg.BedrockBaseURL = "us-east-1", upstream.URL+"/openai/v1"
+			}
+			s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AI: cfg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			for _, app := range []string{"chat", "other", "third", "fourth"} {
+				upload(t, s, app, "app")
+			}
+			call := func(app string) *httptest.ResponseRecorder {
+				return req(s, http.MethodPost, app+".apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"x"}],"max_tokens":1}`), true)
+			}
+			w := call("chat")
+			if w.Code != 200 || w.Header().Get("X-PMQ-Usage-Status") != "unavailable" || w.Header().Get("X-PMQ-Cost-Status") != "estimated" || w.Header().Get("X-PMQ-Pricing-Provenance") != "mock fixture rate" || strings.Contains(w.Body.String(), `"usage"`) {
+				t.Fatalf("missing usage was fabricated: %d headers=%v body=%s", w.Code, w.Header(), w.Body)
+			}
+			w = call("chat")
+			if w.Code != 429 || !strings.Contains(w.Body.String(), "ai_budget_exceeded") || w.Header().Get("Retry-After") == "" || calls != 1 {
+				t.Fatalf("per-app budget did not reject before provider: status=%d calls=%d body=%s", w.Code, calls, w.Body)
+			}
+			includeUsage.Store(true)
+			if w = call("other"); w.Code != 200 || w.Header().Get("X-PMQ-Usage-Status") != "reported" || !strings.Contains(w.Body.String(), `"prompt_tokens":5`) {
+				t.Fatalf("second app should fit global budget: %d %s", w.Code, w.Body)
+			}
+			if w = call("third"); w.Code != 200 {
+				t.Fatalf("third total call should fit global budget: %d %s", w.Code, w.Body)
+			}
+			w = call("fourth")
+			if w.Code != 429 || !strings.Contains(w.Body.String(), "ai_budget_exceeded") || calls != 3 {
+				t.Fatalf("global budget did not reject before provider: status=%d calls=%d body=%s", w.Code, calls, w.Body)
+			}
+		})
+	}
+}
+
+func TestAIConcurrencyLimitsByAppAndGlobally(t *testing.T) {
+	started := make(chan struct{}, 3)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	provider := chatProviderFunc(func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		select {
+		case <-release:
+			return json.RawMessage(chatResponse), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AIProvider: provider, AI: AIConfig{Limits: AILimits{GlobalConcurrency: 2, PerAppConcurrency: 1, GlobalRPM: 100, PerAppRPM: 100}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, app := range []string{"chat", "other", "third"} {
+		upload(t, s, app, "app")
+	}
+	request := func(app string) *httptest.ResponseRecorder {
+		return req(s, http.MethodPost, app+".apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`), true)
+	}
+	done := make(chan *httptest.ResponseRecorder, 2)
+	go func() { done <- request("chat") }()
+	<-started
+	if w := request("chat"); w.Code != 429 || !strings.Contains(w.Body.String(), "ai_concurrency_limited") || calls.Load() != 1 {
+		t.Fatalf("per-app concurrency: %d calls=%d %s", w.Code, calls.Load(), w.Body)
+	}
+	go func() { done <- request("other") }()
+	<-started
+	if w := request("third"); w.Code != 429 || !strings.Contains(w.Body.String(), "ai_concurrency_limited") || calls.Load() != 2 {
+		t.Fatalf("global concurrency: %d calls=%d %s", w.Code, calls.Load(), w.Body)
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		if w := <-done; w.Code != 200 {
+			t.Fatalf("admitted request failed: %d %s", w.Code, w.Body)
+		}
+	}
+}
+
+func TestAIRateAndTokenLimitsRejectBeforeProvider(t *testing.T) {
+	var calls atomic.Int32
+	provider := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		calls.Add(1)
+		return json.RawMessage(chatResponse), nil
+	})
+	limits := AILimits{GlobalRPM: 1, PerAppRPM: 10, GlobalConcurrency: 4, PerAppConcurrency: 2, MaxRequestBytes: 1024, MaxOutputTokens: 2}
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AIProvider: provider, AI: AIConfig{Limits: limits}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	upload(t, s, "chat", "app")
+	call := func(body string) *httptest.ResponseRecorder {
+		return req(s, http.MethodPost, "chat.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(body), true)
+	}
+	if w := call(`{"model":"x","messages":[{"role":"user","content":"hi"}],"max_tokens":3}`); w.Code != 400 || calls.Load() != 0 {
+		t.Fatalf("token cap did not reject early: %d calls=%d %s", w.Code, calls.Load(), w.Body)
+	}
+	if w := call(strings.Repeat(" ", 1025)); w.Code != 413 || calls.Load() != 0 {
+		t.Fatalf("request size limit did not reject early: %d calls=%d", w.Code, calls.Load())
+	}
+	if w := call(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`); w.Code != 200 || calls.Load() != 1 {
+		t.Fatalf("first request failed: %d calls=%d %s", w.Code, calls.Load(), w.Body)
+	}
+	w := call(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 429 || !strings.Contains(w.Body.String(), "ai_rate_limited") || w.Header().Get("Retry-After") == "" || calls.Load() != 1 {
+		t.Fatalf("rate limit failed before provider: %d calls=%d %s", w.Code, calls.Load(), w.Body)
+	}
+}
+
+func TestAIPerAppRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	provider := chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		calls.Add(1)
+		return json.RawMessage(chatResponse), nil
+	})
+	s, err := New(Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "secret", Dev: true, AIProvider: provider, AI: AIConfig{Limits: AILimits{GlobalRPM: 10, PerAppRPM: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	upload(t, s, "chat", "app")
+	upload(t, s, "other", "app")
+	call := func(host string) *httptest.ResponseRecorder {
+		return req(s, http.MethodPost, host, "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`), true)
+	}
+	if w := call("chat.apps.localhost"); w.Code != 200 || calls.Load() != 1 {
+		t.Fatalf("first app request failed: status=%d calls=%d %s", w.Code, calls.Load(), w.Body)
+	}
+	w := call("chat.apps.localhost")
+	if w.Code != 429 || !strings.Contains(w.Body.String(), "ai_rate_limited") || calls.Load() != 1 {
+		t.Fatalf("per-app RPM was not enforced before provider: status=%d calls=%d %s", w.Code, calls.Load(), w.Body)
+	}
+	if w := call("other.apps.localhost"); w.Code != 200 || calls.Load() != 2 {
+		t.Fatalf("per-app limit affected another app: status=%d calls=%d %s", w.Code, calls.Load(), w.Body)
 	}
 }
 
@@ -355,6 +571,54 @@ func TestStreamingClientDisconnectCancelsUpstream(t *testing.T) {
 	}
 }
 
+func TestStreamingProviderErrorReportsUnavailableUsage(t *testing.T) {
+	provider := failingStreamChatProvider{chatProviderFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return nil, errors.New("provider failed")
+	})}
+	s := aiFixture(t, provider)
+	w := req(s, http.MethodPost, "chat.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}],"stream":true}`), true)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "event: pmq-usage\ndata: {\"status\":\"unavailable\"}") || !strings.Contains(w.Body.String(), "event: error") {
+		t.Fatalf("provider error did not report unavailable usage: status=%d headers=%v body=%q", w.Code, w.Header(), w.Body.String())
+	}
+}
+
+func TestAIBudgetMidnightRolloverPreservesActiveReservations(t *testing.T) {
+	limits := AILimits{
+		GlobalRPM: 100, PerAppRPM: 100, GlobalConcurrency: 1, PerAppConcurrency: 1,
+		GlobalBudgetUSD: 1, PerAppBudgetUSD: 1,
+		Pricing: map[string]AIPrice{"fast": {InputUSDPerMillion: 1, OutputUSDPerMillion: 1, Provenance: "test fixture"}},
+	}
+	a := newAIAdmission(limits)
+	now := time.Date(2026, time.January, 1, 23, 59, 0, 0, time.UTC)
+	a.now = func() time.Time { return now }
+	req := ChatRequest{Messages: []ChatMessage{{Role: "user", Content: "hi"}}}
+	first, reason, _ := a.admit("app-a", "fast", req)
+	if first == nil || reason != "" || a.globalActive != 1 {
+		t.Fatalf("initial reservation failed: reservation=%+v reason=%s", first, reason)
+	}
+	dayOneSpend := a.globalSpend
+	now = now.Add(2 * time.Minute)
+	second, reason, _ := a.admit("app-b", "fast", req)
+	if second != nil || reason != "concurrency_limit" {
+		t.Fatalf("active request was lost across midnight: reservation=%+v reason=%s", second, reason)
+	}
+	if a.globalSpend != 0 || len(a.appSpend) != 0 || a.globalActive != 1 {
+		t.Fatalf("daily accounting/concurrency did not roll over independently: spend=%v appSpend=%v active=%d", a.globalSpend, a.appSpend, a.globalActive)
+	}
+	usage := &ChatUsage{PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15, complete: true}
+	if _, status := a.finish(first, usage); status != "reported" {
+		t.Fatalf("finish status = %q", status)
+	}
+	if a.globalSpend != 0 || a.globalActive != 0 {
+		t.Fatalf("old-day completion changed new-day accounting: firstDaySpend=%v currentSpend=%v active=%d", dayOneSpend, a.globalSpend, a.globalActive)
+	}
+	third, reason, _ := a.admit("app-b", "fast", req)
+	if third == nil || reason != "" {
+		t.Fatalf("new-day reservation failed after prior request finished: reservation=%+v reason=%s", third, reason)
+	}
+	a.finish(third, nil)
+}
+
 func TestAIUnauthorizedAndTimeout(t *testing.T) {
 	// The normal server auth boundary rejects API calls before invoking a provider.
 	s := fixture(t, false)
@@ -368,7 +632,7 @@ func TestAIUnauthorizedAndTimeout(t *testing.T) {
 	}))
 	s.aiTimeout = 1
 	w := req(s, http.MethodPost, "chat.apps.localhost", "/_pmq/ai/chat/completions", strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`), true)
-	if w.Code != 504 {
+	if w.Code != 504 || w.Header().Get("X-PMQ-Usage-Status") != "unavailable" {
 		t.Fatalf("timeout: %d %s", w.Code, w.Body)
 	}
 }

@@ -105,6 +105,16 @@ func TestTLSListener(t *testing.T) {
 		t.Fatal(response.Status)
 	}
 }
+
+func TestAIServerWriteTimeoutTracksRequestTimeout(t *testing.T) {
+	if got, want := aiServerWriteTimeout(0), 60*time.Second; got != want {
+		t.Fatalf("default server write timeout = %s, want %s", got, want)
+	}
+	if got, want := aiServerWriteTimeout(10*time.Minute), 10*time.Minute+15*time.Second; got != want {
+		t.Fatalf("configured server write timeout = %s, want %s", got, want)
+	}
+}
+
 func mustParseCert(t *testing.T, der []byte) *x509.Certificate {
 	t.Helper()
 	cert, err := x509.ParseCertificate(der)

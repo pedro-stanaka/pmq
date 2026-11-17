@@ -114,9 +114,18 @@ type Server struct {
 	dbDuration            *prometheus.HistogramVec
 	dbRowsReturned        *prometheus.CounterVec
 	dbErrors              *prometheus.CounterVec
+	aiLimits              AILimits
+	aiAdmission           *aiAdmission
 }
 
 func New(c Config) (*Server, error) {
+	c.AI.Limits = normalizeAILimits(c.AI.Limits)
+	if err := validateAILimits(c.AI.Limits, c.AI.Models); err != nil {
+		return nil, err
+	}
+	if (c.AI.Limits.GlobalBudgetUSD > 0 || c.AI.Limits.PerAppBudgetUSD > 0) && len(c.AI.Models) == 0 {
+		return nil, errors.New("AI budgets require configured model aliases")
+	}
 	if c.Token == "" {
 		return nil, errors.New("deploy token is required")
 	}
@@ -184,14 +193,14 @@ func New(c Config) (*Server, error) {
 	}
 	aiTimeout := c.AIRequestTimeout
 	if aiTimeout <= 0 {
-		aiTimeout = 45 * time.Second
+		aiTimeout = c.AI.Limits.Timeout
 	}
 	return &Server{
 		cfg: c, dbs: make(map[string]*sql.DB), storage: store, metrics: registry,
 		transferCancellations: cancellations, httpRequests: httpRequests, httpDuration: httpDuration,
 		httpInFlight: httpInFlight, storageHTTP: storageHTTP, dbOperations: dbOperations,
 		dbDuration: dbDuration, dbRowsReturned: dbRowsReturned, dbErrors: dbErrors,
-		aiProvider: aiProvider, aiTimeout: aiTimeout,
+		aiProvider: aiProvider, aiTimeout: aiTimeout, aiLimits: c.AI.Limits, aiAdmission: newAIAdmission(c.AI.Limits),
 	}, nil
 }
 func (s *Server) Close() {
@@ -316,7 +325,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if r.URL.Path == "/_pmq/storage" || strings.HasPrefix(r.URL.Path, "/_pmq/storage/") {
 			s.objects(w, r, app)
 		} else if strings.HasPrefix(r.URL.Path, "/_pmq/ai/") {
-			s.ai(w, r)
+			s.ai(w, r, app)
 		} else {
 			fail(w, 404, "not_found", "Endpoint not found")
 		}
