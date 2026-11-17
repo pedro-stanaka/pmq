@@ -14,3 +14,8 @@ jobs:
           cache: true
       - run: make check
       - run: go test -race ./...
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'moto[server]==5.2.5'
+      - run: scripts/test-s3-contract.sh
