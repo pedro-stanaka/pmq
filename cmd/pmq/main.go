@@ -25,7 +25,31 @@ import (
 	"github.com/pmq-dev/pmq/internal/storage"
 )
 
-var version = "dev"
+var (
+	// Overridden at build time by the Makefile, Dockerfile, and GoReleaser
+	// (-X main.version=... etc.) so released binaries report their release.
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+const help = `pmq - Poor Man's Quick: build it, drop it, run it.
+
+Usage: pmq <command> [flags]
+
+Commands:
+  serve     Run the PMQ server (see 'pmq serve --help' for flags)
+  deploy    Upload a built static app directory to the server
+  list      List deployed apps
+  status    Show an app's active release
+  releases  List an app's releases
+  rollback  Activate a previous release
+  prune     Remove old releases beyond the newest N
+  version   Print version, commit, and build date
+  help      Show this help
+
+Documentation: https://github.com/pedro-stanaka/pmq
+`
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -41,11 +65,14 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pmq serve|deploy|list|status|releases|rollback|prune|version")
+		return errors.New("no command given; run 'pmq help' for usage")
 	}
 	switch args[0] {
 	case "version":
-		fmt.Println("pmq", version)
+		fmt.Printf("pmq %s (commit %s, built %s)\n", version, commit, date)
+		return nil
+	case "help", "--help", "-h":
+		fmt.Print(help)
 		return nil
 	case "serve":
 		return serve(args[1:])
