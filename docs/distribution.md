@@ -101,7 +101,7 @@ makepkg -si
 Releases are produced by two workflows; both use pinned, least-privilege GitHub Actions steps:
 
 - **`release.yml`** runs when a `vX.Y.Z` tag is pushed. GoReleaser cross-builds the full platform matrix, packs archives plus `checksums.txt`, creates checksum and provenance attestations, and opens a **draft** GitHub release. Nothing is public until a maintainer reviews the draft and publishes it — publishing is the explicit authorization step.
-- **`images.yml`** builds the multi-arch image on every tag and on `main`, pushes version tags, `latest`, and `edge` to GHCR, and build-tests (without pushing) on pull requests.
+- **`images.yml`** builds the multi-arch image only when it is published: on tags (release tags plus `latest`) and on `main` (`edge`). Pull requests do not build images — the QEMU arm64 build takes ~15–20 minutes and adds no signal beyond the containerized `arch-package` job, which builds the same Dockerfile.
 
 Draft releases keep a changelog generated from merged pull requests (docs/test/chore commits excluded). Release archives contain only the binary, `README.md`, and `LICENSE` — never secrets, `.env` files, certificates, app databases, or local data directories (`.dockerignore` and `.gitignore` keep those out of images and checkouts).
 
