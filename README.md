@@ -1,6 +1,8 @@
 # PMQ — Poor Man's Quick
 
-**Build it. Drop it. Run it.**
+**Your tiny app deserves a tiny cloud.**
+
+Build it. Drop it. Run it.
 
 PMQ hosts static applications, per-app JSON documents, object storage, and an optional OpenAI-compatible AI gateway in one Go process. Deploy a built directory over HTTP and reach it at its own hostname. SQLite and release files live on local disk. PMQ does not run application backend code or provide user accounts or hard tenant isolation.
 

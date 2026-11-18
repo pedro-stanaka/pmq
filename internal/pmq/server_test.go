@@ -1145,6 +1145,18 @@ func TestConsoleLanding(t *testing.T) {
 	if w := req(s, "GET", "apps.localhost:8080", "/", nil, false); w.Code != 200 {
 		t.Fatalf("console with port: %d", w.Code)
 	}
+	// The embedded console must keep credentials ephemeral and render API data as text.
+	console := w.Body.String()
+	for _, forbidden := range []string{"localStorage", "sessionStorage", ".innerHTML"} {
+		if strings.Contains(console, forbidden) {
+			t.Errorf("console contains unsafe persistence or rendering primitive %q", forbidden)
+		}
+	}
+	for _, required := range []string{"Content-Security-Policy", "connect-src 'self'", "textContent", "type=\"file\""} {
+		if !strings.Contains(console, required) {
+			t.Errorf("console missing %q", required)
+		}
+	}
 	// Unknown app hostnames keep 404 semantics.
 	if w := req(s, "GET", "missing.apps.localhost", "/", nil, false); w.Code != 404 {
 		t.Fatal(w.Code)

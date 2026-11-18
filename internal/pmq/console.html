@@ -1,206 +1,46 @@
 <!doctype html>
-<!-- PMQ deploy console, embedded in the server binary and served at the
-     bare PMQ domain root and under /_pmq/admin/. One file, no external
-     assets, no build step. The deploy token is entered at runtime and
-     held only in memory: it is never persisted or sent anywhere except
-     the same-origin admin API. -->
 <html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:">
-<title>PMQ — build it, drop it, run it.</title>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>PMQ — Console</title>
 <style>
-  :root { color-scheme: light dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
-    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    background: #f6f6f7; color: #1f2328; padding: 48px 16px;
-  }
-  @media (prefers-color-scheme: dark) { body { background: #0d1117; color: #e6edf3; } }
-  header { text-align: center; margin-bottom: 28px; }
-  .logo { display: inline-flex; align-items: center; gap: 10px; font-size: 28px; font-weight: 700; }
-  .logo svg { width: 34px; height: 34px; }
-  .tagline { color: #656d76; margin: 8px 0 0; }
-  @media (prefers-color-scheme: dark) { .tagline { color: #8b949e; } }
-  main { width: 100%; max-width: 520px; }
-  .card {
-    background: #fff; border: 1px solid #d0d7de; border-radius: 12px; padding: 20px;
-    box-shadow: 0 1px 3px rgba(31,35,40,.07);
-  }
-  @media (prefers-color-scheme: dark) { .card { background: #161b22; border-color: #30363d; } }
-  label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 4px; }
-  input {
-    width: 100%; padding: 8px 10px; border-radius: 8px; font-size: 15px;
-    border: 1px solid #d0d7de; background: #fff; color: inherit;
-  }
-  @media (prefers-color-scheme: dark) { input { background: #0d1117; border-color: #30363d; } }
-  #drop {
-    margin-top: 16px; border: 2px dashed #d0d7de; border-radius: 12px; padding: 26px 10px;
-    text-align: center; cursor: pointer; user-select: none; color: #656d76; font-size: 15px;
-  }
-  #drop.over { border-color: #3e63dd; color: #3e63dd; }
-  #drop.hasfile { border-style: solid; color: inherit; }
-  @media (prefers-color-scheme: dark) { #drop { border-color: #30363d; color: #8b949e; } }
-  button {
-    margin-top: 18px; width: 100%; padding: 10px; font-size: 16px; font-weight: 600;
-    color: #fff; background: #1f6feb; border: 0; border-radius: 8px; cursor: pointer;
-  }
-  button:hover { background: #388bfd; }
-  button:disabled { opacity: .55; cursor: default; }
-  .bar { margin-top: 14px; height: 8px; border-radius: 4px; background: #d0d7de; overflow: hidden; display: none; }
-  .bar > div { height: 100%; width: 0; background: #1f6feb; transition: width .2s; }
-  @media (prefers-color-scheme: dark) { .bar { background: #21262d; } }
-  .status { margin-top: 12px; font-size: 14px; white-space: pre-wrap; }
-  .status.error { color: #cf222e; }
-  .result { margin-top: 12px; font-size: 15px; display: none; }
-  .result a { color: #1f6feb; }
-  ul.apps { margin: 10px 0 0; padding-left: 20px; font-size: 14px; }
-  .note { margin-top: 16px; font-size: 12.5px; color: #656d76; }
-  @media (prefers-color-scheme: dark) { .note { color: #8b949e; } }
+:root{color-scheme:light dark;--bg:#f6f8f5;--panel:#fff;--ink:#14252a;--muted:#4f6265;--line:#d4dfda;--accent:#176a59;--soft:#e1f0e8;--danger:#a02e32} @media(prefers-color-scheme:dark){:root{--bg:#0c171b;--panel:#132328;--ink:#eef5ef;--muted:#a9bdb9;--line:#2b4142;--accent:#94d9bc;--soft:#1b3a33;--danger:#ffb4ae}}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}::selection{background:#a9ddc8;color:#102920}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}a{color:var(--accent);text-underline-offset:3px}button,input{font:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.topbar{border-bottom:1px solid var(--line)}.top-inner{max-width:1200px;margin:auto;padding:20px 32px;display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:800;letter-spacing:-.03em}.mark{width:32px;height:32px;background:#142b2e;border-radius:7px;display:grid;align-content:center;gap:3px;padding:7px}.mark i{display:block;height:3px;background:#a6ddc2}.mark i:nth-child(2){width:65%}.mark i:nth-child(3){width:40%}.top-label{color:var(--muted);font-size:13px}.shell{max-width:1200px;margin:auto;padding:48px 32px 80px}.intro{display:flex;justify-content:space-between;align-items:end;gap:24px;margin-bottom:36px}h1,h2,h3,p{margin:0}h1{font-size:36px;line-height:1.1;letter-spacing:-.035em}h2{font-size:21px;letter-spacing:-.025em}h3{font-size:15px}.intro p,.muted{color:var(--muted)}.intro p{margin-top:10px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:24px;align-items:start}.stack{display:grid;gap:24px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px}.panel-head{display:flex;justify-content:space-between;align-items:start;gap:16px;margin-bottom:22px}.panel-head p{font-size:13px;color:var(--muted);margin-top:4px}.count{font-size:12px;color:var(--accent);background:var(--soft);border-radius:20px;padding:4px 9px;white-space:nowrap}.empty{border-top:1px solid var(--line);padding:30px 0 12px}.empty strong{display:block;margin-bottom:5px}.empty p,.help{color:var(--muted);font-size:13px}.app{border-top:1px solid var(--line);padding:18px 0}.app:last-child{padding-bottom:0}.app-row{display:flex;align-items:start;justify-content:space-between;gap:12px}.app-name{font-weight:700;overflow-wrap:anywhere}.app-meta{font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted);overflow-wrap:anywhere;margin-top:5px}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:650}.btn:hover{background:var(--soft)}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--bg)}.btn.primary:hover{filter:brightness(.92)}.btn.full{width:100%;padding:11px}.btn.text{border:0;color:var(--accent);padding:0}.releases{margin-top:16px;padding:16px;background:var(--bg);border-radius:8px}.release{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}.release:last-child{border:0}.release-info{font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.release-info span{display:block;color:var(--muted);font-family:system-ui,sans-serif}.active{color:var(--accent);font-size:12px;font-weight:700}.field{margin-top:18px}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input:not([type=file]){width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);padding:10px 11px}input::placeholder{color:var(--muted);opacity:1}.help{margin-top:7px}.drop{display:block;margin-top:18px;padding:27px 16px;text-align:center;border:1px dashed var(--muted);border-radius:8px;cursor:pointer;color:var(--muted);font-size:13px}.drop strong{display:block;color:var(--ink);font-size:14px;margin-bottom:4px}.drop.over{background:var(--soft);border-color:var(--accent)}.drop input{display:block;max-width:100%;margin:12px auto 0;font-size:12px}.deploy{margin-top:18px}.status{font-size:13px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.status:empty{display:none}.error{color:var(--danger)}progress{width:100%;height:8px;accent-color:var(--accent);margin-top:15px}.result{margin-top:12px;overflow-wrap:anywhere;font-size:13px}.result:empty{display:none}.divider{border:0;border-top:1px solid var(--line);margin:22px 0}.footnote{margin-top:16px;color:var(--muted);font-size:12px;line-height:1.6}.system-links{display:flex;gap:16px;flex-wrap:wrap;margin-top:15px;font-size:13px;font-weight:650}.connection{font-size:13px;color:var(--muted)}.connection strong{color:var(--ink)}@media(max-width:850px){.layout{grid-template-columns:1fr}.deploy-panel{grid-row:1}.shell{padding-top:36px}}@media(max-width:480px){.top-inner,.shell{padding-left:20px;padding-right:20px}.top-label{display:none}.intro{display:block}h1{font-size:30px}.panel{padding:20px}.app-row{flex-direction:column}.release{align-items:start;flex-direction:column}}@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
 </style>
-<header>
-  <div class="logo">
-    <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#3e63dd"/><path d="M8 10h16v4h-6v10h-4V14H8z" fill="#fff"/></svg>
-    PMQ
-  </div>
-  <p class="tagline">Build it. Drop it. Run it.</p>
-</header>
-<main>
-  <div class="card">
-    <label for="name">App name</label>
-    <input id="name" placeholder="hello-world" autocomplete="off" spellcheck="false" pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength="63">
-    <label for="token">Deploy token</label>
-    <input id="token" type="password" placeholder="Deployment bearer token" autocomplete="off">
-    <div id="drop" tabindex="0" role="button" aria-label="Choose or drop a zip file">
-      Drop a <strong>.zip</strong> here, or click to choose
-      <div id="filename"></div>
-    </div>
-    <input id="file" type="file" accept=".zip,application/zip" hidden>
-    <div class="bar"><div id="progress"></div></div>
-    <div class="status" id="status"></div>
-    <div class="result" id="result"></div>
-    <ul class="apps" id="apps" hidden></ul>
-    <button id="deploy" disabled>Deploy</button>
-    <p class="note">
-      The zip must contain a root <code>index.html</code>. Deploying an existing
-      name replaces its entire file set; documents and objects are preserved.
-      The token is kept only in this page and sent solely to this PMQ instance.
-    </p>
-  </div>
+</head>
+<body>
+<header class="topbar"><div class="top-inner"><div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>PMQ <span class="top-label">/ console</span></div><span class="top-label">Build it. Drop it. Run it.</span></div></header>
+<main class="shell">
+  <div class="intro"><div><h1>Your apps, at home.</h1><p>Deploy, inspect, and roll back from one quiet place.</p></div><a href="https://pedro-stanaka.github.io/pmq/" target="_blank" rel="noopener">Documentation ↗</a></div>
+  <div class="layout"><div class="stack">
+    <section class="panel" aria-labelledby="apps-title"><div class="panel-head"><div><h2 id="apps-title">Applications</h2><p>Releases hosted by this PMQ server.</p></div><span class="count" id="count">Not connected</span></div><div id="apps"><div class="empty"><strong>Connect to see your apps</strong><p>Enter your deployment token and select Connect. It stays in this page's memory.</p></div></div></section>
+    <section class="panel" aria-labelledby="system-title"><div class="panel-head"><div><h2 id="system-title">System &amp; help</h2><p>Tools and guidance for your PMQ installation.</p></div></div><p class="connection"><strong>Server</strong> <span id="origin"></span></p><p class="footnote">Metrics are available as authenticated Prometheus data. App-level traffic and availability are not shown here. Configure your proxy to restrict admin routes to operators.</p><div class="system-links"><a href="https://pedro-stanaka.github.io/pmq/guides/observability" target="_blank" rel="noopener">Observability guide ↗</a><a href="https://pedro-stanaka.github.io/pmq/guides/production" target="_blank" rel="noopener">Production setup ↗</a></div></section>
+  </div><div class="stack deploy-panel">
+    <section class="panel" aria-labelledby="connect-title"><div class="panel-head"><div><h2 id="connect-title">Connection</h2><p id="connection-state">Token required for admin actions.</p></div></div><label for="token">Deploy token</label><input id="token" type="password" placeholder="Deployment bearer token" autocomplete="off"><p class="help">Kept in memory only and sent to this server's admin API.</p><div class="field"><label for="app-domain">App domain <span class="muted">(optional)</span></label><input id="app-domain" placeholder="apps.example.com" autocomplete="off" spellcheck="false"><p class="help">Set the public app domain to enable Open and Copy links. Include a port if needed.</p></div><div class="actions" style="margin-top:14px"><button class="btn" id="connect" type="button">Connect</button><button class="btn" id="disconnect" type="button" disabled>Disconnect</button></div><p class="status" id="connection-message" role="status"></p></section>
+    <section class="panel" aria-labelledby="deploy-title"><div class="panel-head"><div><h2 id="deploy-title">Deploy an app</h2><p>A built frontend, ready to go.</p></div></div><label for="name">App name</label><input id="name" placeholder="hello-world" autocomplete="off" spellcheck="false" maxlength="63"><p class="help">Lowercase letters, numbers and single hyphens.</p><label class="drop" id="drop" for="file"><strong>Drop your .zip here</strong>or choose a file<input id="file" type="file" accept=".zip,application/zip"></label><p class="help" id="filename">Include an index.html at the root of the archive.</p><p class="footnote">Deploying an existing name replaces its active files. Documents and objects are preserved; previous releases remain available.</p><button class="btn primary full deploy" id="deploy" type="button" disabled>Deploy app</button><progress id="progress" max="100" value="0" hidden aria-label="Upload progress"></progress><p class="status" id="status" role="status"></p><div class="result" id="result"></div></section>
+  </div></div>
 </main>
 <script>
-(function () {
-  var drop = document.getElementById('drop');
-  var fileInput = document.getElementById('file');
-  var nameInput = document.getElementById('name');
-  var tokenInput = document.getElementById('token');
-  var deployButton = document.getElementById('deploy');
-  var status = document.getElementById('status');
-  var result = document.getElementById('result');
-  var apps = document.getElementById('apps');
-  var bar = document.querySelector('.bar');
-  var progress = document.getElementById('progress');
-  var filename = document.getElementById('filename');
-  var file = null;
-
-  function ready() {
-    var n = nameInput.value;
-    var okName = /^[a-z0-9]+(-[a-z0-9]+)*$/.test(n) && n.length <= 63 &&
-      !/^(admin|api|www|pmq)$/.test(n);
-    deployButton.disabled = !(okName && file && tokenInput.value);
-  }
-  nameInput.addEventListener('input', ready);
-  tokenInput.addEventListener('input', ready);
-
-  function setFile(f) {
-    if (!f) return;
-    if (!/\.zip$/i.test(f.name) && f.type !== 'application/zip') {
-      message('Only .zip archives are accepted.', true);
-      return;
-    }
-    file = f;
-    filename.textContent = f.name + ' (' + (f.size / 1048576).toFixed(1) + ' MiB)';
-    drop.classList.add('hasfile');
-    ready();
-  }
-  drop.addEventListener('click', function () { fileInput.click(); });
-  drop.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
-  });
-  fileInput.addEventListener('change', function () { setFile(this.files[0]); });
-  ['dragenter', 'dragover'].forEach(function (ev) {
-    drop.addEventListener(ev, function (e) {
-      e.preventDefault(); drop.classList.add('over');
-    });
-  });
-  ['dragleave', 'drop'].forEach(function (ev) {
-    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
-  });
-  drop.addEventListener('drop', function (e) { setFile(e.dataTransfer.files[0]); });
-
-  function message(text, isError) {
-    status.textContent = text;
-    status.className = 'status' + (isError ? ' error' : '');
-  }
-
-  deployButton.addEventListener('click', function () {
-    var name = encodeURIComponent(nameInput.value.trim());
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/_pmq/admin/deploy/' + name);
-    xhr.setRequestHeader('Authorization', 'Bearer ' + tokenInput.value);
-    xhr.setRequestHeader('Content-Type', 'application/zip');
-    xhr.upload.onprogress = function (e) {
-      if (e.lengthComputable) {
-        bar.style.display = 'block';
-        progress.style.width = Math.round(e.loaded / e.total * 100) + '%';
-      }
-    };
-    xhr.onload = function () {
-      if (xhr.status === 201) {
-        bar.style.display = 'none';
-        result.style.display = 'block';
-        var host = location.hostname + (location.port ? ':' + location.port : '');
-        var scheme = location.protocol !== 'http:' ? 'https' : 'http';
-        result.innerHTML = '<strong>' + nameInput.value + '</strong> is live at ' +
-          '<a target="_blank" rel="noopener" href="' + scheme + '://' +
-          nameInput.value + '.' + host + '/">' + nameInput.value + '.' + host + '</a>';
-        message('Deployed.');
-        listApps();
-      } else {
-        var detail = '';
-        try {
-          detail = JSON.parse(xhr.responseText).error.message;
-        } catch (e) {}
-        message('Deploy failed (' + xhr.status + '): ' + (detail || xhr.statusText), true);
-      }
-    };
-    xhr.onerror = function () {
-      message('Network error — is this host allowed to reach the admin API behind your proxy?', true);
-    };
-    message('Uploading\u2026');
-    result.style.display = 'none';
-    xhr.send(file);
-  });
-
-  function listApps() {
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', '/_pmq/admin/apps');
-    xhr.setRequestHeader('Authorization', 'Bearer ' + tokenInput.value);
-    xhr.onload = function () {
-      if (xhr.status !== 200) { return; }
-      var list = [];
-      try { list = JSON.parse(xhr.responseText).apps || []; } catch (e) { return; }
-      apps.hidden = false;
-      apps.innerHTML = '';
-      list.forEach(function (a) {
-        var li = document.createElement('li');
-        li.textContent = a;
-        apps.appendChild(li);
-      });
-    };
-    xhr.send();
-  }
+(function(){
+  'use strict';
+  var $=function(id){return document.getElementById(id)}, token=$('token'), apps=$('apps'), file=null, connected=false, names=[];
+  $('origin').textContent=location.origin;
+  function validName(n){return /^[a-z0-9]+(-[a-z0-9]+)*$/.test(n)&&n.length<=63&&!/^(admin|api|www|pmq)$/.test(n)}
+  function ready(){$('deploy').disabled=!(connected&&validName($('name').value)&&file)}
+  function message(id,text,error){var el=$(id);el.textContent=text;el.classList.toggle('error',!!error)}
+  function node(tag,text,cls){var e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e}
+  function request(method,path,body,done){var x=new XMLHttpRequest();x.open(method,'/_pmq/admin/'+path);x.setRequestHeader('Authorization','Bearer '+token.value);if(body){x.setRequestHeader('Content-Type','application/json')}x.onload=function(){var data={};try{data=JSON.parse(x.responseText)}catch(e){}done(x.status,data)};x.onerror=function(){done(0,{})};x.send(body?JSON.stringify(body):null)}
+  function failure(code,data){return code===0?'Cannot reach the admin API. Check your proxy and connection.':code===401?'Token rejected. Check the token and admin ingress.':(data.error&&data.error.message)||('Request failed ('+code+').')}
+  function list(){request('GET','apps',null,function(code,data){if(code!==200){connected=false;ready();$('connection-state').textContent='Not connected.';message('connection-message',failure(code,data),true);return}connected=true;$('connect').textContent='Refresh';$('disconnect').disabled=false;$('connection-state').textContent='Connected to the admin API.';message('connection-message','',false);names=Array.isArray(data.apps)?data.apps:[];render();ready()})}
+  function appURL(name){var domain=$('app-domain').value.trim().toLowerCase();if(!/^(?=.{1,253}(?::[0-9]{1,5})?$)[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?$/.test(domain))return '';return location.protocol+'//'+name+'.'+domain+'/'}
+  $('app-domain').addEventListener('input',function(){if(connected)render()});
+  function render(){apps.replaceChildren();$('count').textContent=names.length+' '+(names.length===1?'app':'apps');if(!names.length){var empty=node('div',undefined,'empty');empty.append(node('strong','No apps deployed yet'),node('p','Choose a name and a built zip to deploy your first app.'));apps.append(empty);return}names.forEach(function(name){var row=node('div',undefined,'app'), top=node('div',undefined,'app-row'), info=node('div'), actions=node('div',undefined,'actions'), details=node('div',undefined,'releases');details.hidden=true;info.append(node('div',name,'app-name'),node('div','Select releases to inspect the active version.','app-meta'));var button=node('button','Releases','btn');button.type='button';button.setAttribute('aria-expanded','false');button.addEventListener('click',function(){if(!details.hidden){details.hidden=true;button.setAttribute('aria-expanded','false');return}details.hidden=false;button.setAttribute('aria-expanded','true');loadReleases(name,details,info.lastChild)});actions.append(button);var url=appURL(name);if(url){var open=node('a','Open','btn');open.href=url;open.target='_blank';open.rel='noopener';actions.append(open);var copy=node('button','Copy URL','btn');copy.type='button';copy.addEventListener('click',function(){if(navigator.clipboard){navigator.clipboard.writeText(url).then(function(){message('connection-message','Copied '+name+' URL.',false)},function(){message('connection-message','Copy failed; open the app and copy its address.',true)})}else{message('connection-message','Clipboard unavailable; open the app and copy its address.',true)}});actions.append(copy)}top.append(info,actions);row.append(top,details);apps.append(row)})}
+  function loadReleases(name,box,meta){box.replaceChildren(node('p','Loading releases…','help'));request('GET','releases/'+encodeURIComponent(name),null,function(code,data){box.replaceChildren();if(code!==200){box.append(node('p',failure(code,data),'error'));return}meta.textContent='Active release: '+data.activeRelease;(data.releases||[]).forEach(function(rel){var item=node('div',undefined,'release'), info=node('div',rel.id,'release-info');var date=new Date(rel.createdAt);info.append(node('span',isNaN(date.getTime())?'Date unavailable':date.toLocaleString()));item.append(info);if(rel.active){item.append(node('span','Active','active'))}else{var b=node('button','Activate','btn');b.type='button';b.addEventListener('click',function(){if(!window.confirm('Activate release '+rel.id+' for '+name+'? App files will change. Documents and objects are preserved.'))return;b.disabled=true;request('POST','rollback/'+encodeURIComponent(name),{release:rel.id},function(c,d){if(c!==200){b.disabled=false;message('connection-message',failure(c,d),true);return}message('connection-message','Release activated for '+name+'.',false);loadReleases(name,box,meta)})});item.append(b)}box.append(item)})})}
+  $('connect').addEventListener('click',function(){if(!token.value){message('connection-message','Enter a deploy token first.',true);return}list()});$('disconnect').addEventListener('click',function(){token.value='';connected=false;names=[];$('connect').textContent='Connect';$('disconnect').disabled=true;$('connection-state').textContent='Token required for admin actions.';$('count').textContent='Not connected';apps.replaceChildren();var e=node('div',undefined,'empty');e.append(node('strong','Connect to see your apps'),node('p','Enter your deployment token and select Connect. It stays in this page’s memory.'));apps.append(e);message('connection-message','Disconnected.',false);ready()});token.addEventListener('input',function(){connected=false;$('connection-state').textContent='Token changed; reconnect to continue.';ready()});$('name').addEventListener('input',ready);
+  function setFile(f){file=null;if(f&&(/\.zip$/i.test(f.name)||f.type==='application/zip')){file=f;$('filename').textContent=f.name+' ('+(f.size/1048576).toFixed(1)+' MiB)';message('status','',false)}else{ $('filename').textContent='Choose a .zip archive with a root index.html.';if(f)message('status','Only .zip archives are accepted.',true)}ready()}
+  $('file').addEventListener('change',function(){setFile(this.files[0])});['dragenter','dragover'].forEach(function(ev){$('drop').addEventListener(ev,function(e){e.preventDefault();$('drop').classList.add('over')})});['dragleave','drop'].forEach(function(ev){$('drop').addEventListener(ev,function(e){e.preventDefault();$('drop').classList.remove('over')})});$('drop').addEventListener('drop',function(e){setFile(e.dataTransfer.files[0])});
+  $('deploy').addEventListener('click',function(){var name=$('name').value, x=new XMLHttpRequest();$('deploy').disabled=true;$('result').replaceChildren();message('status','Uploading…',false);x.open('POST','/_pmq/admin/deploy/'+encodeURIComponent(name));x.setRequestHeader('Authorization','Bearer '+token.value);x.setRequestHeader('Content-Type','application/zip');x.upload.onprogress=function(e){if(e.lengthComputable){$('progress').hidden=false;$('progress').value=Math.round(e.loaded/e.total*100)}};x.onload=function(){$('progress').hidden=true;ready();if(x.status===201){message('status','Deployment complete.',false);var url=appURL(name);if(url){$('result').append(node('span','App URL: '));var link=node('a',url);link.href=url;link.target='_blank';link.rel='noopener';$('result').append(link)}else{$('result').textContent='Set the app domain above to open or copy its URL.'}list()}else{var data={};try{data=JSON.parse(x.responseText)}catch(e){}message('status',failure(x.status,data),true)}};x.onerror=function(){$('progress').hidden=true;ready();message('status',failure(0,{}),true)};x.send(file)});
 })();
 </script>
-</html>
+</body></html>
