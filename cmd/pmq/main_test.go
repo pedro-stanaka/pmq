@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,12 +13,15 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pmq-dev/pmq/internal/pmq"
 )
 
 func TestDevelopmentTLSConfiguration(t *testing.T) {
@@ -169,4 +173,59 @@ func captureStdout(t *testing.T, f func()) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestDeployZipArchive(t *testing.T) {
+	t.Setenv("PMQ_DEPLOY_TOKEN", "test-only")
+	s, err := pmq.New(pmq.Config{Listen: "127.0.0.1:8080", DataDir: t.TempDir(), Domain: "apps.localhost", Token: "test-only", Dev: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+	t.Setenv("PMQ_SERVER", ts.URL)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: "index.html", Method: zip.Deflate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("from a zip")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zipPath := filepath.Join(t.TempDir(), "app.zip")
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"deploy", zipPath, "--name", "zipped"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := http.NewRequest("GET", ts.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Host = "zipped.apps.localhost"
+	resp, err := ts.Client().Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(b) != "from a zip" {
+		t.Fatalf("zipped app response: %d %q", resp.StatusCode, b)
+	}
+	// Non-zip files are rejected before any upload happens.
+	badDir := t.TempDir()
+	badFile := filepath.Join(badDir, "x.txt")
+	if err := os.WriteFile(badFile, []byte("no"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"deploy", badFile, "--name", "zipped"}); err == nil {
+		t.Fatal("non-zip regular file accepted")
+	}
 }

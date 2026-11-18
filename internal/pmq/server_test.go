@@ -2,6 +2,7 @@ package pmq
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -995,5 +997,173 @@ func TestInterruptedAndOversizedDeploy(t *testing.T) {
 	w = req(s, "GET", "hello.apps.localhost", "/_pmq/storage/object", nil, false)
 	if w.Code != 404 {
 		t.Fatal("reserved route served as app content", w.Code)
+	}
+}
+
+func zipArchive(t *testing.T, entries []struct {
+	name string
+	data string
+	dir  bool
+	mode os.FileMode
+}) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	for _, e := range entries {
+		if e.dir {
+			h := &zip.FileHeader{Name: e.name}
+			h.SetMode(fs.ModeDir | 0700)
+			if _, err := zw.CreateHeader(h); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		mode := e.mode
+		if mode == 0 {
+			mode = 0600
+		}
+		h := &zip.FileHeader{Name: e.name, Method: zip.Deflate}
+		h.SetMode(mode)
+		w, err := zw.CreateHeader(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(e.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+func TestZipDeploy(t *testing.T) {
+	s := fixture(t, true)
+	var link = os.ModeSymlink | 0777
+	// Happy path: zip with a subdirectory and files.
+	body := zipArchive(t, []struct {
+		name string
+		data string
+		dir  bool
+		mode os.FileMode
+	}{
+		{name: "index.html", data: "zip release"},
+		{name: "assets/", dir: true},
+		{name: "assets/app.js", data: "console.log(1)"},
+	})
+	w := req(s, "POST", "localhost", "/_pmq/admin/deploy/zipapp", bytes.NewReader(body), true)
+	if w.Code != 201 {
+		t.Fatalf("deploy %d %s", w.Code, w.Body)
+	}
+	for _, p := range []string{"/", "/assets/app.js"} {
+		w := req(s, "GET", "zipapp.apps.localhost", p, nil, false)
+		if w.Code != 200 {
+			t.Fatalf("%s: %d", p, w.Code)
+		}
+	}
+	// Redeploying replaces the whole file set: omitted files disappear.
+	body = zipArchive(t, []struct {
+		name string
+		data string
+		dir  bool
+		mode os.FileMode
+	}{{name: "index.html", data: "zip release two"}})
+	w = req(s, "POST", "localhost", "/_pmq/admin/deploy/zipapp", bytes.NewReader(body), true)
+	if w.Code != 201 {
+		t.Fatalf("redeploy %d %s", w.Code, w.Body)
+	}
+	if w := req(s, "GET", "zipapp.apps.localhost", "/assets/app.js", nil, false); w.Body.String() == "console.log(1)" {
+		t.Fatal("omitted file still served")
+	}
+	if w := req(s, "GET", "zipapp.apps.localhost", "/", nil, false); w.Body.String() != "zip release two" {
+		t.Fatal(w.Body)
+	}
+	// Unsafe and invalid archives are rejected and never touch the release.
+	active := func() string {
+		w := req(s, "GET", "zipapp.apps.localhost", "/", nil, false)
+		return w.Body.String()
+	}
+	for _, entries := range [][]struct {
+		name string
+		data string
+		dir  bool
+		mode os.FileMode
+	}{
+		{{name: "../index.html", data: "bad"}},
+		{{name: "/index.html", data: "bad"}},
+		{{name: "a/../../index.html", data: "bad"}},
+		{{name: "index.html", data: "x", mode: link}},
+		{{name: "index.html", data: "one"}, {name: "index.html", data: "two"}},
+		{{name: "noindex.html", data: "x"}},
+	} {
+		w := req(s, "POST", "localhost", "/_pmq/admin/deploy/zipapp", bytes.NewReader(zipArchive(t, entries)), true)
+		if w.Code != 400 {
+			t.Fatalf("unsafe zip accepted: %d %s", w.Code, w.Body)
+		}
+		if active() != "zip release two" {
+			t.Fatal("failed zip changed the active release")
+		}
+	}
+	// Garbage that is neither gzip nor zip is rejected.
+	w = req(s, "POST", "localhost", "/_pmq/admin/deploy/zipapp", bytes.NewReader([]byte("MZnotanarchive")), true)
+	if w.Code != 400 {
+		t.Fatalf("unknown format accepted: %d", w.Code)
+	}
+}
+
+func TestZipDeployUncompressedCap(t *testing.T) {
+	s := fixture(t, true)
+	// Two 20 MiB zero entries deflate to almost nothing but exceed the
+	// uncompressed total cap; the upload itself stays well under MaxUpload.
+	big := strings.Repeat("\x00", 20<<20)
+	body := zipArchive(t, []struct {
+		name string
+		data string
+		dir  bool
+		mode os.FileMode
+	}{{name: "a.bin", data: big}, {name: "b.bin", data: big}})
+	if int64(len(body)) > MaxUpload/2 {
+		t.Fatal("test premise: compressed zip should be small")
+	}
+	w := req(s, "POST", "localhost", "/_pmq/admin/deploy/capapp", bytes.NewReader(body), true)
+	if w.Code != 400 {
+		t.Fatalf("oversized uncompressed total accepted: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestConsoleLanding(t *testing.T) {
+	s := fixture(t, true)
+	// The bare domain root serves the deploy console.
+	w := req(s, "GET", "apps.localhost", "/", nil, false)
+	if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("console: %d %v", w.Code, w.Header())
+	}
+	if !strings.Contains(w.Body.String(), "PMQ") || !strings.Contains(w.Body.String(), "Content-Security-Policy") {
+		t.Fatal("unexpected console body")
+	}
+	if w := req(s, "GET", "apps.localhost:8080", "/", nil, false); w.Code != 200 {
+		t.Fatalf("console with port: %d", w.Code)
+	}
+	// Unknown app hostnames keep 404 semantics.
+	if w := req(s, "GET", "missing.apps.localhost", "/", nil, false); w.Code != 404 {
+		t.Fatal(w.Code)
+	}
+	// Non-root paths on the bare domain are not the console.
+	if w := req(s, "GET", "apps.localhost", "/favicon.ico", nil, false); w.Code != 404 {
+		t.Fatal(w.Code)
+	}
+	// Deployed apps are unaffected.
+	upload(t, s, "hello", "first")
+	if w := req(s, "GET", "hello.apps.localhost", "/", nil, false); w.Code != 200 || w.Body.String() != "first" {
+		t.Fatal(w.Code, w.Body)
+	}
+	// The operator path requires the token even to view.
+	if w := req(s, "GET", "localhost", "/_pmq/admin/", nil, false); w.Code != 401 {
+		t.Fatal(w.Code)
+	}
+	w = req(s, "GET", "localhost", "/_pmq/admin/", nil, true)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "PMQ") {
+		t.Fatalf("operator console: %d", w.Code)
 	}
 }

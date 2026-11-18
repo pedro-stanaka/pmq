@@ -16,7 +16,7 @@ hero:
 features:
   - icon: 📦
     title: One-command deploys
-    details: Build a static app, run pmq deploy, and it is live at its own hostname. No new containers, proxy configs, databases, or pipelines per app.
+    details: Build a static app, run pmq deploy, and it is live at its own hostname. Or open your PMQ domain and drop a .zip in the browser console. No new containers, proxy configs, databases, or pipelines per app.
   - icon: 🗄️
     title: JSON documents per app
     details: Per-app SQLite-backed collections behind /_pmq/db — create, list, get, replace, and delete documents over plain HTTP.

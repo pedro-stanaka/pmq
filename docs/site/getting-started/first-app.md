@@ -30,6 +30,8 @@ pmq list --server http://127.0.0.1:8080
 pmq status hello-world --server http://127.0.0.1:8080
 ```
 
+No CLI at hand? Open the PMQ domain itself (`http://apps.localhost:8080`) for the built-in web console: name the app, drop a `.zip` with a root `index.html`, paste the token, and it deploys — the same request the CLI makes.
+
 Deploying an existing name replaces its entire active set of files with the new directory — files omitted from the upload are no longer part of the app. Persistent documents are preserved; previous releases stay on disk for rollback.
 
 ## 4. Open the app
